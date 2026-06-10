@@ -4,5 +4,5 @@
 - [x] Task 2: Estrutura HTML (`index.html`)
 - [x] Task 3: Estilização Visual (`styles.css`)
 - [x] Task 4: Lógica JavaScript - Configuração WebRTC e Streamer (`app.js` Parte 1)
-- [ ] Task 5: Lógica JavaScript - Viewer & Envio de Inputs (`app.js` Parte 2)
-- [ ] Task 6: Documentação de Inicialização (`README.md`)
+- [x] Task 5: Lógica JavaScript - Viewer & Envio de Inputs (`app.js` Parte 2)
+- [x] Task 6: Documentação de Inicialização (`README.md`)
