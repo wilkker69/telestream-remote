@@ -17,6 +17,9 @@ def validate_and_parse_command(message_str):
     except ValueError:
         return None, "Erro de JSON inválido"
     
+    if not isinstance(msg, dict):
+        return None, "Mensagem inválida (esperado objeto JSON)"
+    
     msg_type = msg.get("type")
     if not msg_type:
         return None, "Tipo ausente"
@@ -26,15 +29,24 @@ def validate_and_parse_command(message_str):
         y = msg.get("y")
         if x is None or y is None:
             return None, "Coordenadas ausentes"
-        return ("mousemove", float(x), float(y)), None
+        try:
+            return ("mousemove", float(x), float(y)), None
+        except ValueError:
+            return None, "Coordenadas inválidas"
+            
     elif msg_type in ["mousedown", "mouseup", "click"]:
         btn = msg.get("button", "left")
         if btn not in ["left", "right", "middle"]:
             return None, "Botão inválido"
         return (msg_type, btn), None
+        
     elif msg_type == "scroll":
         delta = msg.get("deltaY", 0)
-        return ("scroll", int(delta)), None
+        try:
+            return ("scroll", int(delta)), None
+        except ValueError:
+            return None, "deltaY inválido"
+            
     elif msg_type in ["keydown", "keyup"]:
         key = msg.get("key")
         if not key:
@@ -52,41 +64,44 @@ async def handle_client(websocket):
                 print(f"[AGENTE] Comando inválido recebido: {err} ({message})")
                 continue
             
-            action = cmd[0]
-            
-            if action == "mousemove":
-                _, rx, ry = cmd
-                # Mapear coordenadas de 0.0-1.0 para resolução absoluta da tela
-                abs_x = int(rx * SCREEN_WIDTH)
-                abs_y = int(ry * SCREEN_HEIGHT)
-                pyautogui.moveTo(abs_x, abs_y)
-            
-            elif action == "click":
-                _, button = cmd
-                pyautogui.click(button=button)
-            
-            elif action == "mousedown":
-                _, button = cmd
-                pyautogui.mouseDown(button=button)
-            
-            elif action == "mouseup":
-                _, button = cmd
-                pyautogui.mouseUp(button=button)
-            
-            elif action == "scroll":
-                _, delta_y = cmd
-                # pyautogui.scroll aceita valores positivos para cima e negativos para baixo
-                # deltaY no JS é positivo para rolagem para baixo, inverte o sinal
-                pyautogui.scroll(-delta_y)
-            
-            elif action == "keydown":
-                _, key = cmd
-                # Mapear algumas teclas especiais se necessário
-                pyautogui.keyDown(key)
-            
-            elif action == "keyup":
-                _, key = cmd
-                pyautogui.keyUp(key)
+            try:
+                action = cmd[0]
+                
+                if action == "mousemove":
+                    _, rx, ry = cmd
+                    # Mapear coordenadas de 0.0-1.0 para resolução absoluta da tela
+                    abs_x = int(rx * SCREEN_WIDTH)
+                    abs_y = int(ry * SCREEN_HEIGHT)
+                    pyautogui.moveTo(abs_x, abs_y)
+                
+                elif action == "click":
+                    _, button = cmd
+                    pyautogui.click(button=button)
+                
+                elif action == "mousedown":
+                    _, button = cmd
+                    pyautogui.mouseDown(button=button)
+                
+                elif action == "mouseup":
+                    _, button = cmd
+                    pyautogui.mouseUp(button=button)
+                
+                elif action == "scroll":
+                    _, delta_y = cmd
+                    # pyautogui.scroll aceita valores positivos para cima e negativos para baixo
+                    # deltaY no JS é positivo para rolagem para baixo, inverte o sinal
+                    pyautogui.scroll(-delta_y)
+                
+                elif action == "keydown":
+                    _, key = cmd
+                    # Mapear algumas teclas especiais se necessário
+                    pyautogui.keyDown(key)
+                
+                elif action == "keyup":
+                    _, key = cmd
+                    pyautogui.keyUp(key)
+            except Exception as cmd_err:
+                print(f"[AGENTE] Erro ao executar comando {cmd}: {cmd_err}")
                 
     except websockets.exceptions.ConnectionClosed:
         print("[AGENTE] Transmissor desconectou do agente local.")
