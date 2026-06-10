@@ -247,12 +247,8 @@ document.addEventListener('DOMContentLoaded', () => {
         console.log('[VIEWER] Conectando ao ID:', targetId);
 
         // 1. Abre a conexão de dados (DataChannel)
-        // PERFORMANCE: reliable:false = modo UDP (sem re-transmissão de pacotes perdidos)
-        // Para inputs de mouse, um pacote perdido é melhor ignorar do que esperar - reduz latência massivamente
-        currentDataConnection = peer.connect(targetId, {
-            reliable: false
-            // REMOVIDO: serialization: 'none' - causava fechamento prematuro do DataChannel
-        });
+        // Conexão padrão do PeerJS - confiável e compatível com a versão 1.5.2
+        currentDataConnection = peer.connect(targetId);
 
         currentDataConnection.on('open', () => {
             console.log('[VIEWER] Conexão de dados aberta!');
