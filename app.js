@@ -89,55 +89,77 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // --- Lógica do Streamer (Transmissor) ---
+
+    // Registra todos os event handlers de um objeto peer do streamer.
+    // Separado de initStreamerMode para permitir re-registro após reconexão.
+    function attachStreamerHandlers(peerObj) {
+        peerObj.on('open', (id) => {
+            streamerIdDisplay.textContent = id;
+            streamerIdDisplay.className = 'badge badge-green';
+            console.log('[STREAMER] ID PeerJS gerado:', id);
+        });
+
+        peerObj.on('connection', (conn) => {
+            console.log('[STREAMER] Conexão de dados recebida do Viewer');
+            activeConnections.push(conn);
+
+            conn.on('data', (data) => {
+                // PERFORMANCE: O viewer envia JSON string, repassar diretamente sem re-serializar
+                if (localAgentSocket && localAgentSocket.readyState === WebSocket.OPEN) {
+                    // Se já é string, enviar direto. Se é objeto (fallback), serializar
+                    const payload = typeof data === 'string' ? data : JSON.stringify(data);
+                    localAgentSocket.send(payload);
+                } else {
+                    console.warn('[STREAMER] Recebeu comando, mas o agente Python não está conectado.');
+                }
+            });
+
+            conn.on('close', () => {
+                console.log('[STREAMER] Conexão de dados do Viewer fechada');
+                activeConnections = activeConnections.filter(c => c !== conn);
+            });
+        });
+
+        peerObj.on('call', (call) => {
+            console.log('[STREAMER] Recebendo chamada de vídeo do Viewer. Respondendo...');
+            if (localStream) {
+                call.answer(localStream);
+                currentCall = call;
+            } else {
+                console.warn('[STREAMER] Nenhuma stream de vídeo local activa para responder a chamada.');
+            }
+        });
+
+        peerObj.on('error', (err) => {
+            console.error('[STREAMER] Erro PeerJS:', err);
+            // Tipos de erro que indicam queda do servidor de sinalização
+            const serverErrors = ['server-error', 'network', 'socket-error', 'socket-closed'];
+            if (serverErrors.includes(err.type)) {
+                console.warn('[STREAMER] Servidor de sinalização PeerJS caiu. Reconectando em 3s...');
+                streamerIdDisplay.textContent = 'Reconectando...';
+                streamerIdDisplay.className = 'badge badge-gray';
+                // Preservar o ID atual para que o Viewer não precise trocar
+                const oldId = peerObj.id || ('telestream-' + Math.random().toString(36).substring(2, 8));
+                peer.destroy();
+                peer = null;
+                setTimeout(() => {
+                    peer = new Peer(oldId);
+                    attachStreamerHandlers(peer);
+                }, 3000);
+            } else {
+                streamerIdDisplay.textContent = 'Erro de Rede';
+                streamerIdDisplay.className = 'badge badge-red';
+            }
+        });
+    }
+
     function initStreamerMode() {
         connectLocalAgent();
         // Configura o PeerJS
         if (!peer) {
             const uniqueId = 'telestream-' + Math.random().toString(36).substring(2, 8);
             peer = new Peer(uniqueId);
-
-            peer.on('open', (id) => {
-                streamerIdDisplay.textContent = id;
-                streamerIdDisplay.className = 'badge badge-green';
-                console.log('[STREAMER] ID PeerJS gerado:', id);
-            });
-
-            peer.on('connection', (conn) => {
-                console.log('[STREAMER] Conexão de dados recebida do Viewer');
-                activeConnections.push(conn);
-                
-                conn.on('data', (data) => {
-                    // PERFORMANCE: O viewer envia JSON string, repassar diretamente sem re-serializar
-                    if (localAgentSocket && localAgentSocket.readyState === WebSocket.OPEN) {
-                        // Se já é string, enviar direto. Se é objeto (fallback), serializar
-                        const payload = typeof data === 'string' ? data : JSON.stringify(data);
-                        localAgentSocket.send(payload);
-                    } else {
-                        console.warn('[STREAMER] Recebeu comando, mas o agente Python não está conectado.');
-                    }
-                });
-
-                conn.on('close', () => {
-                    console.log('[STREAMER] Conexão de dados do Viewer fechada');
-                    activeConnections = activeConnections.filter(c => c !== conn);
-                });
-            });
-
-            peer.on('call', (call) => {
-                console.log('[STREAMER] Recebendo chamada de vídeo do Viewer. Respondendo...');
-                if (localStream) {
-                    call.answer(localStream);
-                    currentCall = call;
-                } else {
-                    console.warn('[STREAMER] Nenhuma stream de vídeo local activa para responder a chamada.');
-                }
-            });
-
-            peer.on('error', (err) => {
-                console.error('[STREAMER] Erro PeerJS:', err);
-                streamerIdDisplay.textContent = 'Erro de Rede';
-                streamerIdDisplay.className = 'badge badge-red';
-            });
+            attachStreamerHandlers(peer);
         }
     }
 
@@ -228,8 +250,8 @@ document.addEventListener('DOMContentLoaded', () => {
         // PERFORMANCE: reliable:false = modo UDP (sem re-transmissão de pacotes perdidos)
         // Para inputs de mouse, um pacote perdido é melhor ignorar do que esperar - reduz latência massivamente
         currentDataConnection = peer.connect(targetId, {
-            reliable: false,
-            serialization: 'none'
+            reliable: false
+            // REMOVIDO: serialization: 'none' - causava fechamento prematuro do DataChannel
         });
 
         currentDataConnection.on('open', () => {
