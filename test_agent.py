@@ -70,3 +70,46 @@ def test_validate_and_parse_command_invalid_parameters():
     cmd, err = validate_and_parse_command('{"type": "keydown"}')
     assert cmd is None
     assert err == "Tecla ausente"
+
+def test_handle_client_failsafe():
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+    import pyautogui
+    import agent
+
+    async def run_test():
+        # Mock stop_future
+        agent.stop_future = asyncio.get_running_loop().create_future()
+        
+        # Mock websocket that yields one valid mousemove message
+        mock_websocket = AsyncMock()
+        
+        async def mock_iter(*args, **kwargs):
+            yield '{"type": "mousemove", "x": 0.5, "y": 0.5}'
+            
+        mock_websocket.__aiter__ = mock_iter
+        
+        with patch("pyautogui.moveTo", side_effect=pyautogui.FailSafeException("Failsafe")):
+            with pytest.raises(pyautogui.FailSafeException):
+                await agent.handle_client(mock_websocket)
+                
+            assert agent.stop_future.done()
+            with pytest.raises(pyautogui.FailSafeException):
+                await agent.stop_future
+                
+    asyncio.run(run_test())
+
+def test_headless_resolution_fallback():
+    import importlib
+    from unittest.mock import patch
+    import agent
+
+    with patch("pyautogui.size", side_effect=Exception("Headless error")):
+        importlib.reload(agent)
+        assert agent.SCREEN_WIDTH == 1920
+        assert agent.SCREEN_HEIGHT == 1080
+
+    # Restore the actual screen size after test
+    importlib.reload(agent)
+
+

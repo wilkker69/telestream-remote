@@ -1,5 +1,6 @@
 import asyncio
 import websockets
+import websockets.exceptions
 import json
 import pyautogui
 
@@ -7,9 +8,16 @@ import pyautogui
 pyautogui.FAILSAFE = True
 pyautogui.PAUSE = 0.05  # Intervalo leve entre comandos para estabilidade
 
-# Obter dimensões da tela local
-SCREEN_WIDTH, SCREEN_HEIGHT = pyautogui.size()
-print(f"[AGENTE] Resolução da tela detectada: {SCREEN_WIDTH}x{SCREEN_HEIGHT}")
+# Referência ao future para parar o servidor em caso de failsafe
+stop_future = None
+
+# Obter dimensões da tela local com fallback headless
+try:
+    SCREEN_WIDTH, SCREEN_HEIGHT = pyautogui.size()
+    print(f"[AGENTE] Resolução da tela detectada: {SCREEN_WIDTH}x{SCREEN_HEIGHT}")
+except Exception as e:
+    print(f"[AGENTE] [Aviso] Não foi possível detectar resolução da tela: {e}. Usando fallback 1920x1080.")
+    SCREEN_WIDTH, SCREEN_HEIGHT = 1920, 1080
 
 def validate_and_parse_command(message_str):
     try:
@@ -56,6 +64,7 @@ def validate_and_parse_command(message_str):
     return None, "Tipo desconhecido"
 
 async def handle_client(websocket):
+    global stop_future
     print("[AGENTE] Transmissor conectado ao agente local.")
     try:
         async for message in websocket:
@@ -64,12 +73,10 @@ async def handle_client(websocket):
                 print(f"[AGENTE] Comando inválido recebido: {err} ({message})")
                 continue
             
+            action = cmd[0]
             try:
-                action = cmd[0]
-                
                 if action == "mousemove":
                     _, rx, ry = cmd
-                    # Mapear coordenadas de 0.0-1.0 para resolução absoluta da tela
                     abs_x = int(rx * SCREEN_WIDTH)
                     abs_y = int(ry * SCREEN_HEIGHT)
                     pyautogui.moveTo(abs_x, abs_y)
@@ -88,33 +95,43 @@ async def handle_client(websocket):
                 
                 elif action == "scroll":
                     _, delta_y = cmd
-                    # pyautogui.scroll aceita valores positivos para cima e negativos para baixo
-                    # deltaY no JS é positivo para rolagem para baixo, inverte o sinal
                     pyautogui.scroll(-delta_y)
                 
                 elif action == "keydown":
                     _, key = cmd
-                    # Mapear algumas teclas especiais se necessário
                     pyautogui.keyDown(key)
                 
                 elif action == "keyup":
                     _, key = cmd
                     pyautogui.keyUp(key)
-            except Exception as cmd_err:
-                print(f"[AGENTE] Erro ao executar comando {cmd}: {cmd_err}")
+            except pyautogui.FailSafeException as failsafe_err:
+                print("[AGENTE] Failsafe do PyAutoGUI acionado! Encerrando...")
+                # Raise to propagate out of the client handler and terminate
+                raise failsafe_err
+            except Exception as exec_err:
+                print(f"[AGENTE] Erro ao executar comando {cmd}: {exec_err}")
                 
     except websockets.exceptions.ConnectionClosed:
         print("[AGENTE] Transmissor desconectou do agente local.")
+    except pyautogui.FailSafeException as failsafe_err:
+        # Reraise so it propagates to the main runner
+        if stop_future and not stop_future.done():
+            stop_future.set_exception(failsafe_err)
+        raise
     except Exception as e:
         print(f"[AGENTE] Erro durante a conexão: {e}")
 
 async def main():
+    global stop_future
+    stop_future = asyncio.get_running_loop().create_future()
     print("[AGENTE] Iniciando servidor WebSocket local na porta 9000...")
     async with websockets.serve(handle_client, "127.0.0.1", 9000):
-        await asyncio.Future()  # Executa para sempre
+        await stop_future
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\n[AGENTE] Encerrado pelo usuário.")
+    except pyautogui.FailSafeException:
+        print("[AGENTE] Servidor encerrado via Failsafe do PyAutoGUI.")
