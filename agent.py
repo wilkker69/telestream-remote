@@ -39,7 +39,7 @@ def validate_and_parse_command(message_str):
             return None, "Coordenadas ausentes"
         try:
             return ("mousemove", float(x), float(y)), None
-        except ValueError:
+        except (ValueError, TypeError):
             return None, "Coordenadas inválidas"
             
     elif msg_type in ["mousedown", "mouseup", "click"]:
@@ -52,7 +52,7 @@ def validate_and_parse_command(message_str):
         delta = msg.get("deltaY", 0)
         try:
             return ("scroll", int(delta)), None
-        except ValueError:
+        except (ValueError, TypeError):
             return None, "deltaY inválido"
             
     elif msg_type in ["keydown", "keyup"]:
@@ -77,8 +77,10 @@ async def handle_client(websocket):
             try:
                 if action == "mousemove":
                     _, rx, ry = cmd
-                    abs_x = int(rx * SCREEN_WIDTH)
-                    abs_y = int(ry * SCREEN_HEIGHT)
+                    # Garante que as coordenadas remotas fiquem entre 1 e SCREEN - 2,
+                    # deixando as bordas extremas livres apenas para o mouse físico do host acionar o Failsafe.
+                    abs_x = max(1, min(SCREEN_WIDTH - 2, int(rx * SCREEN_WIDTH)))
+                    abs_y = max(1, min(SCREEN_HEIGHT - 2, int(ry * SCREEN_HEIGHT)))
                     pyautogui.moveTo(abs_x, abs_y)
                 
                 elif action == "click":

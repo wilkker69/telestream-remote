@@ -112,4 +112,66 @@ def test_headless_resolution_fallback():
     # Restore the actual screen size after test
     importlib.reload(agent)
 
+def test_validate_and_parse_command_type_error():
+    # Coordenadas com tipo inválido (list ou dict)
+    cmd, err = validate_and_parse_command('{"type": "mousemove", "x": [1, 2], "y": 0.5}')
+    assert cmd is None
+    assert err == "Coordenadas inválidas"
 
+    cmd, err = validate_and_parse_command('{"type": "mousemove", "x": 0.5, "y": {"nested": 1}}')
+    assert cmd is None
+    assert err == "Coordenadas inválidas"
+
+    # Scroll com tipo inválido (list ou dict)
+    cmd, err = validate_and_parse_command('{"type": "scroll", "deltaY": [120]}')
+    assert cmd is None
+    assert err == "deltaY inválido"
+
+    cmd, err = validate_and_parse_command('{"type": "scroll", "deltaY": {"nested": 1}}')
+    assert cmd is None
+    assert err == "deltaY inválido"
+
+def test_handle_client_coordinate_clamping():
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+    import agent
+
+    # Usando resolucao conhecida para facilitar as contas
+    agent.SCREEN_WIDTH = 1000
+    agent.SCREEN_HEIGHT = 1000
+
+    async def run_test():
+        # Testar cantos extremos (0,0) -> deve ir para (1, 1)
+        # Testar cantos extremos (1,1) -> deve ir para (SCREEN_WIDTH - 2, SCREEN_HEIGHT - 2)
+        # Testar valores fora dos limites (ex: negativos ou maiores que 1.0)
+        messages = [
+            '{"type": "mousemove", "x": 0.0, "y": 0.0}',
+            '{"type": "mousemove", "x": 1.0, "y": 1.0}',
+            '{"type": "mousemove", "x": -0.5, "y": 1.5}'
+        ]
+        
+        mock_websocket = AsyncMock()
+        
+        async def mock_iter(*args, **kwargs):
+            for m in messages:
+                yield m
+            
+        mock_websocket.__aiter__ = mock_iter
+        
+        with patch("pyautogui.moveTo") as mock_move_to:
+            await agent.handle_client(mock_websocket)
+            
+            # moveTo deve ter sido chamado com valores clamped:
+            # 1. (0.0 * 1000, 0.0 * 1000) -> (0, 0) clamped -> (1, 1)
+            # 2. (1.0 * 1000, 1.0 * 1000) -> (1000, 1000) clamped -> (998, 998)
+            # 3. (-0.5 * 1000, 1.5 * 1000) -> (-500, 1500) clamped -> (1, 998)
+            assert mock_move_to.call_count == 3
+            mock_move_to.assert_any_call(1, 1)
+            mock_move_to.assert_any_call(998, 998)
+            mock_move_to.assert_any_call(1, 998)
+
+    asyncio.run(run_test())
+    
+    # Recarrega o agent para restaurar a resolução real
+    import importlib
+    importlib.reload(agent)
