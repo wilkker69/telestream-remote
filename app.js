@@ -570,46 +570,54 @@ document.addEventListener('DOMContentLoaded', () => {
             
             signalingWebsocket = new WebSocket(wsUrl);
 
-            signalingWebsocket.onopen = async () => {
-                console.log('[VIEWER] Canal de sinalização WebSocket conectado.');
-                
-                // Criar oferta SDP
-                const offer = await rtcPeerConnection.createOffer();
-                await rtcPeerConnection.setLocalDescription(offer);
-
-                // Esperar a coleta de candidatos ICE se completar
-                rtcPeerConnection.onicegatheringstatechange = () => {
-                    if (rtcPeerConnection.iceGatheringState === 'complete') {
-                        console.log('[VIEWER] ICE Gathering completo. Enviando oferta SDP...');
-                        signalingWebsocket.send(JSON.stringify({
-                            type: 'OFFER',
-                            src: viewerId,
-                            dst: targetId,
-                            payload: {
-                                type: 'offer',
-                                sdp: rtcPeerConnection.localDescription.sdp
-                            }
-                        }));
-                    }
-                };
-                
-                if (rtcPeerConnection.iceGatheringState === 'complete') {
-                    signalingWebsocket.send(JSON.stringify({
-                        type: 'OFFER',
-                        src: viewerId,
-                        dst: targetId,
-                        payload: {
-                            type: 'offer',
-                            sdp: rtcPeerConnection.localDescription.sdp
-                        }
-                    }));
-                }
+            signalingWebsocket.onopen = () => {
+                console.log('[VIEWER] Canal de sinalização WebSocket conectado. Aguardando registro de ID...');
             };
 
             signalingWebsocket.onmessage = async (event) => {
                 try {
                     const data = JSON.parse(event.data);
-                    if (data.type === 'ANSWER') {
+                    
+                    // Passo 1: Recebeu confirmação de registro de ID na nuvem PeerJS
+                    if (data.type === 'OPEN') {
+                        console.log('[VIEWER] ID registrado com sucesso no servidor de sinalização!');
+                        logViewerEvent('Sinalização ativa. Iniciando handshake WebRTC...', 'info');
+                        
+                        // Gerar oferta SDP
+                        const offer = await rtcPeerConnection.createOffer();
+                        await rtcPeerConnection.setLocalDescription(offer);
+
+                        // Configurar envio do SDP quando a coleta de ICE terminar
+                        rtcPeerConnection.onicegatheringstatechange = () => {
+                            if (rtcPeerConnection.iceGatheringState === 'complete') {
+                                console.log('[VIEWER] ICE Gathering completo. Enviando oferta SDP...');
+                                sendSignal({
+                                    type: 'OFFER',
+                                    src: viewerId,
+                                    dst: targetId,
+                                    payload: {
+                                        type: 'offer',
+                                        sdp: rtcPeerConnection.localDescription.sdp
+                                    }
+                                });
+                            }
+                        };
+                        
+                        if (rtcPeerConnection.iceGatheringState === 'complete') {
+                            sendSignal({
+                                type: 'OFFER',
+                                src: viewerId,
+                                dst: targetId,
+                                payload: {
+                                    type: 'offer',
+                                    sdp: rtcPeerConnection.localDescription.sdp
+                                }
+                            });
+                        }
+                    }
+                    
+                    // Passo 2: Recebeu resposta do Python
+                    else if (data.type === 'ANSWER') {
                         console.log('[VIEWER] Resposta SDP remota recebida.');
                         await rtcPeerConnection.setRemoteDescription(new RTCSessionDescription({
                             type: 'answer',
@@ -625,6 +633,15 @@ document.addEventListener('DOMContentLoaded', () => {
                     console.error('[VIEWER] Erro na sinalização:', err);
                 }
             };
+
+            function sendSignal(msg) {
+                if (signalingWebsocket && signalingWebsocket.readyState === WebSocket.OPEN) {
+                    signalingWebsocket.send(JSON.stringify(msg));
+                } else {
+                    console.warn('[VIEWER] WebSocket não está pronto. Agendando envio em 100ms...');
+                    setTimeout(() => sendSignal(msg), 100);
+                }
+            }
 
             signalingWebsocket.onerror = (err) => {
                 console.error('[VIEWER] Erro de sinalização:', err);
