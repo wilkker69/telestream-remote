@@ -33,6 +33,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let localAgentSocket = null;
     let currentCall = null;
     let currentDataConnection = null;
+    let reconnectTimeout = null;
 
     // Navegação do Hub
     btnSelectStreamer.addEventListener('click', () => {
@@ -76,8 +77,8 @@ document.addEventListener('DOMContentLoaded', () => {
             agentStatus.textContent = 'Desconectado';
             agentStatus.className = 'badge badge-red';
             localAgentSocket = null;
-            // Tenta reconectar a cada 5 segundos
-            setTimeout(connectLocalAgent, 5000);
+            // Tenta reconectar a cada 5 segundos se não estiver sendo limpo
+            reconnectTimeout = setTimeout(connectLocalAgent, 5000);
         };
 
         localAgentSocket.onerror = (err) => {
@@ -154,9 +155,12 @@ document.addEventListener('DOMContentLoaded', () => {
             btnStopStream.classList.remove('hidden');
 
             // Se a stream for interrompida pelo botão flutuante nativo do navegador
-            localStream.getVideoTracks()[0].onended = () => {
-                stopStream();
-            };
+            const videoTrack = localStream.getVideoTracks()[0];
+            if (videoTrack) {
+                videoTrack.onended = () => {
+                    stopStream();
+                };
+            }
 
             console.log('[STREAMER] Captura de tela iniciada com sucesso.');
         } catch (err) {
@@ -189,10 +193,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function cleanupAll() {
         stopStream();
+        
+        if (reconnectTimeout) {
+            clearTimeout(reconnectTimeout);
+            reconnectTimeout = null;
+        }
         if (localAgentSocket) {
+            localAgentSocket.onclose = null; // Evita loop de reconexão
             localAgentSocket.close();
             localAgentSocket = null;
         }
+        activeConnections.forEach(conn => conn.close());
+        activeConnections = [];
+        
         if (peer) {
             peer.destroy();
             peer = null;
