@@ -12,7 +12,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnStartStream = document.getElementById('btn-start-stream');
     const btnStopStream = document.getElementById('btn-stop-stream');
     const agentStatus = document.getElementById('agent-status');
+    const agentPulse = document.getElementById('agent-pulse');
     const streamerIdDisplay = document.getElementById('streamer-id-display');
+    const btnCopyId = document.getElementById('btn-copy-id');
     const localVideoPreview = document.getElementById('local-video-preview');
 
     // Elementos do Viewer
@@ -25,6 +27,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const videoContainer = document.getElementById('video-container');
     const videoPlaceholder = document.getElementById('video-placeholder');
     const remoteVideo = document.getElementById('remote-video');
+    const btnToggleScale = document.getElementById('btn-toggle-scale');
+    const btnFullscreen = document.getElementById('btn-fullscreen');
 
     // Variaveis de Estado
     let peer = null;
@@ -36,6 +40,13 @@ document.addEventListener('DOMContentLoaded', () => {
     let reconnectTimeout = null;
     let lastMouseMoveTime = 0;
     const MOUSE_MOVE_THROTTLE_MS = 16; // ~60 vezes por segundo (60Hz) - mais responsivo
+
+    // Variáveis para estatísticas do WebRTC
+    let statsInterval = null;
+    let lastFramesDecoded = 0;
+    let lastBytesReceived = 0;
+    let lastStatsTimestamp = 0;
+    let isOriginalScale = true;
 
     // Navegação do Hub
     btnSelectStreamer.addEventListener('click', () => {
@@ -59,12 +70,96 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
+    // --- Helpers de Logs para os Consoles ---
+    function escapeHtml(text) {
+        const map = {
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#039;'
+        };
+        return text.toString().replace(/[&<>"']/g, function(m) { return map[m]; });
+    }
+
+    function logStreamerEvent(message, type = 'info') {
+        const consoleBody = document.getElementById('streamer-console');
+        if (!consoleBody) return;
+        
+        const placeholder = consoleBody.querySelector('.console-placeholder');
+        if (placeholder) placeholder.remove();
+        
+        const timeStr = new Date().toLocaleTimeString();
+        const line = document.createElement('div');
+        line.className = `console-line ${type}`;
+        line.innerHTML = `<span class="timestamp">[${timeStr}]</span>${escapeHtml(message)}`;
+        
+        consoleBody.appendChild(line);
+        consoleBody.scrollTop = consoleBody.scrollHeight;
+        
+        // Limite de linhas
+        while (consoleBody.childElementCount > 30) {
+            consoleBody.removeChild(consoleBody.firstChild);
+        }
+        
+        // Efeito de pulso rápido no console
+        const pulse = document.getElementById('streamer-console-pulse');
+        if (pulse) {
+            pulse.style.animation = 'none';
+            void pulse.offsetWidth; // trigger reflow
+            pulse.style.animation = 'consolePulseAnim 0.5s ease-out';
+        }
+    }
+
+    function logViewerEvent(message, type = 'info') {
+        const consoleBody = document.getElementById('viewer-console');
+        if (!consoleBody) return;
+        
+        const placeholder = consoleBody.querySelector('.console-placeholder');
+        if (placeholder) placeholder.remove();
+        
+        const timeStr = new Date().toLocaleTimeString();
+        const line = document.createElement('div');
+        line.className = `console-line ${type}`;
+        line.innerHTML = `<span class="timestamp">[${timeStr}]</span>${escapeHtml(message)}`;
+        
+        consoleBody.appendChild(line);
+        consoleBody.scrollTop = consoleBody.scrollHeight;
+        
+        // Limite de linhas
+        while (consoleBody.childElementCount > 30) {
+            consoleBody.removeChild(consoleBody.firstChild);
+        }
+
+        // Efeito de pulso rápido no console
+        const pulse = document.getElementById('viewer-console-pulse');
+        if (pulse) {
+            pulse.style.animation = 'none';
+            void pulse.offsetWidth; // trigger reflow
+            pulse.style.animation = 'consolePulseAnim 0.5s ease-out';
+        }
+    }
+
+    // Copiar ID do Streamer
+    btnCopyId.addEventListener('click', () => {
+        const id = streamerIdDisplay.textContent;
+        if (id && id !== 'Aguardando...' && id !== 'Reconectando...') {
+            navigator.clipboard.writeText(id).then(() => {
+                const originalText = btnCopyId.textContent;
+                btnCopyId.textContent = '✅';
+                logStreamerEvent('ID de conexão copiado para a área de transferência.', 'info');
+                setTimeout(() => { btnCopyId.textContent = originalText; }, 1500);
+            });
+        }
+    });
+
     // --- Lógica do Agente Python Local (WebSocket) ---
     function connectLocalAgent() {
         if (localAgentSocket && (localAgentSocket.readyState === WebSocket.OPEN || localAgentSocket.readyState === WebSocket.CONNECTING)) return;
 
         agentStatus.textContent = 'Conectando...';
         agentStatus.className = 'badge badge-gray';
+        agentPulse.className = 'pulse-dot red';
 
         // Conecta no websocket local aberto pelo python agent.py
         localAgentSocket = new WebSocket('ws://localhost:9000');
@@ -72,13 +167,17 @@ document.addEventListener('DOMContentLoaded', () => {
         localAgentSocket.onopen = () => {
             agentStatus.textContent = 'Conectado';
             agentStatus.className = 'badge badge-green';
+            agentPulse.className = 'pulse-dot green';
             console.log('[STREAMER] Conectado ao agente Python local na porta 9000');
+            logStreamerEvent('Agente Python local conectado na porta 9000.', 'info');
         };
 
         localAgentSocket.onclose = () => {
             agentStatus.textContent = 'Desconectado';
             agentStatus.className = 'badge badge-red';
+            agentPulse.className = 'pulse-dot red';
             localAgentSocket = null;
+            logStreamerEvent('Agente Python local desconectado.', 'warn');
             // Tenta reconectar a cada 5 segundos se não estiver sendo limpo
             reconnectTimeout = setTimeout(connectLocalAgent, 5000);
         };
@@ -96,49 +195,79 @@ document.addEventListener('DOMContentLoaded', () => {
         peerObj.on('open', (id) => {
             streamerIdDisplay.textContent = id;
             streamerIdDisplay.className = 'badge badge-green';
+            btnCopyId.classList.remove('hidden');
             console.log('[STREAMER] ID PeerJS gerado:', id);
+            logStreamerEvent(`Sinalização ativa. ID gerado: ${id}`, 'info');
         });
 
         peerObj.on('connection', (conn) => {
             console.log('[STREAMER] Conexão de dados recebida do Viewer');
+            logStreamerEvent('Viewer conectado via DataChannel (P2P).', 'info');
             activeConnections.push(conn);
 
             conn.on('data', (data) => {
                 // PERFORMANCE: O viewer envia JSON string, repassar diretamente sem re-serializar
                 if (localAgentSocket && localAgentSocket.readyState === WebSocket.OPEN) {
-                    // Se já é string, enviar direto. Se é objeto (fallback), serializar
                     const payload = typeof data === 'string' ? data : JSON.stringify(data);
                     localAgentSocket.send(payload);
+
+                    // Adicionar ao painel de logs do Streamer
+                    try {
+                        const parsed = typeof data === 'string' ? JSON.parse(data) : data;
+                        let desc = '';
+                        if (parsed.type === 'mousemove') {
+                            desc = `Mouse posic. em: (${parsed.x.toFixed(3)}, ${parsed.y.toFixed(3)})`;
+                        } else if (parsed.type === 'mousedown') {
+                            desc = `Clique pressionado: ${parsed.button}`;
+                        } else if (parsed.type === 'mouseup') {
+                            desc = `Clique liberado: ${parsed.button}`;
+                        } else if (parsed.type === 'scroll') {
+                            desc = `Rolagem de tela (deltaY: ${parsed.deltaY})`;
+                        } else if (parsed.type === 'keydown') {
+                            desc = `Tecla pressionada: ${parsed.key}`;
+                        } else if (parsed.type === 'keyup') {
+                            desc = `Tecla liberada: ${parsed.key}`;
+                        } else {
+                            desc = parsed.type;
+                        }
+                        logStreamerEvent(`Ação: ${desc}`, 'action');
+                    } catch (e) {}
                 } else {
                     console.warn('[STREAMER] Recebeu comando, mas o agente Python não está conectado.');
+                    logStreamerEvent('Ação recebida, mas o agente Python está desconectado!', 'warn');
                 }
             });
 
             conn.on('close', () => {
                 console.log('[STREAMER] Conexão de dados do Viewer fechada');
+                logStreamerEvent('Viewer encerrou a conexão de dados.', 'warn');
                 activeConnections = activeConnections.filter(c => c !== conn);
             });
         });
 
         peerObj.on('call', (call) => {
             console.log('[STREAMER] Recebendo chamada de vídeo do Viewer. Respondendo...');
+            logStreamerEvent('Chamada de vídeo recebida. Transmitindo stream...', 'info');
             if (localStream) {
                 call.answer(localStream);
                 currentCall = call;
             } else {
-                console.warn('[STREAMER] Nenhuma stream de vídeo local activa para responder a chamada.');
+                console.warn('[STREAMER] Nenhuma stream de vídeo local ativa para responder a chamada.');
+                logStreamerEvent('Falha: nenhuma tela sendo capturada para enviar!', 'warn');
             }
         });
 
         peerObj.on('error', (err) => {
             console.error('[STREAMER] Erro PeerJS:', err);
+            logStreamerEvent(`Erro de Sinalização: ${err.message || err.type}`, 'warn');
             // Tipos de erro que indicam queda do servidor de sinalização
             const serverErrors = ['server-error', 'network', 'socket-error', 'socket-closed'];
             if (serverErrors.includes(err.type)) {
                 console.warn('[STREAMER] Servidor de sinalização PeerJS caiu. Reconectando em 3s...');
                 streamerIdDisplay.textContent = 'Reconectando...';
                 streamerIdDisplay.className = 'badge badge-gray';
-                // Preservar o ID atual para que o Viewer não precise trocar
+                btnCopyId.classList.add('hidden');
+                
                 const oldId = peerObj.id || ('telestream-' + Math.random().toString(36).substring(2, 8));
                 peer.destroy();
                 peer = null;
@@ -193,8 +322,10 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             console.log('[STREAMER] Captura de tela iniciada com sucesso.');
+            logStreamerEvent('Captura de tela local iniciada a 60 FPS / 1080p.', 'info');
         } catch (err) {
             console.error('[STREAMER] Falha ao capturar tela:', err);
+            logStreamerEvent(`Falha na captura: ${err.message}`, 'warn');
             alert('Não foi possível iniciar a captura de tela. Certifique-se de dar as permissões necessárias.');
         }
     });
@@ -218,61 +349,200 @@ document.addEventListener('DOMContentLoaded', () => {
         btnStartStream.classList.remove('hidden');
         btnStopStream.classList.add('hidden');
         console.log('[STREAMER] Transmissão parada.');
+        logStreamerEvent('Transmissão de vídeo finalizada.', 'info');
     }
 
+    // --- Lógica do Visualizador (Viewer) ---
     function initViewerMode() {
         if (!peer) {
-            // Cria um ID temporário e curto para o visualizador
             const viewerId = 'telestream-view-' + Math.random().toString(36).substring(2, 8);
             peer = new Peer(viewerId);
 
             peer.on('error', (err) => {
                 console.error('[VIEWER] Erro PeerJS:', err);
                 connectionStatus.textContent = 'Erro';
-                connectionStatus.className = 'badge badge-red';
+                connectionStatus.className = 'badge-text';
+                document.getElementById('viewer-pulse-dot').className = 'pulse-dot red';
             });
         }
     }
 
+    // Monitoramento de FPS e Latência em Tempo Real via WebRTC Stats
+    function startStatsMonitoring(pc) {
+        if (statsInterval) clearInterval(statsInterval);
+        
+        lastFramesDecoded = 0;
+        lastBytesReceived = 0;
+        lastStatsTimestamp = performance.now();
+        
+        statsInterval = setInterval(async () => {
+            if (!pc || pc.connectionState === 'closed' || pc.connectionState === 'failed') {
+                clearInterval(statsInterval);
+                return;
+            }
+            
+            try {
+                const stats = await pc.getStats();
+                const now = performance.now();
+                const deltaSeconds = (now - lastStatsTimestamp) / 1000;
+                
+                stats.forEach(report => {
+                    // FPS e Bytes recebidos (Vídeo)
+                    if (report.type === 'inbound-rtp' && report.kind === 'video') {
+                        const framesDecoded = report.framesDecoded || 0;
+                        const bytesReceived = report.bytesReceived || 0;
+                        
+                        if (deltaSeconds > 0) {
+                            // FPS
+                            const fps = Math.round((framesDecoded - lastFramesDecoded) / deltaSeconds);
+                            document.getElementById('val-fps').textContent = Math.max(0, fps);
+                            
+                            // Banda (Kbps)
+                            const bytesDelta = bytesReceived - lastBytesReceived;
+                            const kbps = Math.round(((bytesDelta * 8) / 1000) / deltaSeconds);
+                            document.getElementById('val-bandwidth').textContent = `${Math.max(0, kbps)} Kbps`;
+                        }
+                        
+                        lastFramesDecoded = framesDecoded;
+                        lastBytesReceived = bytesReceived;
+                    }
+                    
+                    // RTT (Latência da Rede)
+                    if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+                        const rtt = report.currentRoundTripTime;
+                        if (rtt !== undefined) {
+                            const latencyMs = Math.round(rtt * 1000);
+                            document.getElementById('val-latency').textContent = `${latencyMs} ms`;
+                            
+                            // Atualizar a cor da bolinha de status baseado no RTT
+                            const pulseDot = document.getElementById('viewer-pulse-dot');
+                            if (pulseDot) {
+                                if (latencyMs < 50) {
+                                    pulseDot.className = 'pulse-dot green';
+                                } else if (latencyMs < 150) {
+                                    pulseDot.className = 'pulse-dot yellow'; // no CSS, a pulse-dot amarela herda outra animação se necessário
+                                    pulseDot.style.backgroundColor = 'var(--accent-yellow)';
+                                } else {
+                                    pulseDot.className = 'pulse-dot red';
+                                    pulseDot.style.backgroundColor = 'var(--accent-red)';
+                                }
+                            }
+                        }
+                    }
+                });
+                
+                lastStatsTimestamp = now;
+            } catch (err) {
+                console.warn('[VIEWER] Erro ao buscar estatísticas:', err);
+            }
+        }, 1000);
+    }
+
+    function stopStatsMonitoring() {
+        if (statsInterval) {
+            clearInterval(statsInterval);
+            statsInterval = null;
+        }
+        document.getElementById('val-fps').textContent = '0';
+        document.getElementById('val-latency').textContent = '0 ms';
+        document.getElementById('val-bandwidth').textContent = '0 Kbps';
+        document.getElementById('viewer-pulse-dot').className = 'pulse-dot green';
+        document.getElementById('viewer-pulse-dot').style.backgroundColor = '';
+    }
+
+    // Toggle de escala
+    btnToggleScale.addEventListener('click', () => {
+        isOriginalScale = !isOriginalScale;
+        if (isOriginalScale) {
+            videoContainer.classList.remove('fill-scale');
+            btnToggleScale.textContent = '📏 Original';
+        } else {
+            videoContainer.classList.add('fill-scale');
+            btnToggleScale.textContent = '📏 Esticar';
+        }
+        logViewerEvent(`Escala de vídeo alterada para: ${isOriginalScale ? 'Original' : 'Esticar'}`, 'info');
+    });
+
+    // Tela cheia
+    btnFullscreen.addEventListener('click', () => {
+        if (!document.fullscreenElement) {
+            videoContainer.requestFullscreen().catch(err => {
+                console.error(`Erro ao ativar Tela Cheia: ${err.message}`);
+            });
+        } else {
+            document.exitFullscreen();
+        }
+    });
+    
+    document.addEventListener('fullscreenchange', () => {
+        if (document.fullscreenElement) {
+            btnFullscreen.textContent = '📺 Janela';
+            logViewerEvent('Tela Cheia ativada.', 'info');
+        } else {
+            btnFullscreen.textContent = '📺 Tela Cheia';
+            logViewerEvent('Tela Cheia desativada.', 'info');
+        }
+    });
+
+    // Toggle de exibição do console ao habilitar controle remoto
+    toggleControlEnabled.addEventListener('change', () => {
+        const consoleWrapper = document.getElementById('viewer-console-wrapper');
+        const viewerGrid = document.querySelector('.viewer-grid');
+        if (toggleControlEnabled.checked) {
+            consoleWrapper.classList.remove('hidden');
+            viewerGrid.classList.add('with-console');
+            logViewerEvent('Controle remoto habilitado. Teclado e mouse ativos.', 'info');
+        } else {
+            consoleWrapper.classList.add('hidden');
+            viewerGrid.classList.remove('with-console');
+        }
+    });
+
     btnConnectStream.addEventListener('click', () => {
         const targetId = inputTargetId.value.trim();
         if (!targetId) {
-            alert('Por favor, insira o ID do Transmissor.');
+            alert('Por favor, insira a chave do Transmissor.');
             return;
         }
 
         connectionStatus.textContent = 'Conectando...';
-        connectionStatus.className = 'badge badge-gray';
+        document.getElementById('viewer-pulse-dot').className = 'pulse-dot red'; // piscando vermelho durante handshake
 
         console.log('[VIEWER] Conectando ao ID:', targetId);
 
         // 1. Abre a conexão de dados (DataChannel)
-        // Conexão padrão do PeerJS - confiável e compatível com a versão 1.5.2
         currentDataConnection = peer.connect(targetId);
 
         currentDataConnection.on('open', () => {
             console.log('[VIEWER] Conexão de dados aberta!');
             connectionStatus.textContent = 'Conectado';
-            connectionStatus.className = 'badge badge-green';
+            document.getElementById('viewer-pulse-dot').className = 'pulse-dot green';
             
             btnConnectStream.classList.add('hidden');
             btnDisconnectStream.classList.remove('hidden');
             viewerControlBar.classList.remove('hidden');
             inputTargetId.disabled = true;
+
+            logViewerEvent(`Conectado ao transmissor: ${targetId}`, 'info');
+            if (toggleControlEnabled.checked) {
+                document.getElementById('viewer-console-wrapper').classList.remove('hidden');
+                document.querySelector('.viewer-grid').classList.add('with-console');
+            }
         });
 
         currentDataConnection.on('close', () => {
             console.log('[VIEWER] Conexão de dados encerrada.');
+            logViewerEvent('Conexão de dados encerrada pelo parceiro.', 'warn');
             disconnectViewer();
         });
 
         currentDataConnection.on('error', (err) => {
             console.error('[VIEWER] Erro na conexão de dados:', err);
+            logViewerEvent(`Erro na conexão de dados: ${err.message}`, 'warn');
             disconnectViewer();
         });
 
         // 2. Inicia chamada de mídia (requisita vídeo do streamer)
-        // Criamos uma stream silenciosa fake só para convencer o PeerJS a responder com a stream do streamer
         navigator.mediaDevices.getUserMedia = navigator.mediaDevices.getUserMedia || navigator.mediaDevices.webkitGetUserMedia || navigator.mediaDevices.mozGetUserMedia;
         
         const canvas = document.createElement('canvas');
@@ -284,9 +554,15 @@ document.addEventListener('DOMContentLoaded', () => {
         
         call.on('stream', (remoteStream) => {
             console.log('[VIEWER] Recebeu stream de vídeo do transmissor.');
+            logViewerEvent('Stream de vídeo recebido com sucesso via WebRTC.', 'info');
             remoteVideo.srcObject = remoteStream;
             remoteVideo.classList.remove('hidden');
             videoPlaceholder.classList.add('hidden');
+            
+            // Iniciar coleta de FPS e RTT
+            if (call.peerConnection) {
+                startStatsMonitoring(call.peerConnection);
+            }
         });
 
         call.on('close', () => {
@@ -303,10 +579,12 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     btnDisconnectStream.addEventListener('click', () => {
+        logViewerEvent('Desconectando sessão ativa...', 'info');
         disconnectViewer();
     });
 
     function disconnectViewer() {
+        stopStatsMonitoring();
         if (currentCall) {
             currentCall.close();
             currentCall = null;
@@ -325,8 +603,10 @@ document.addEventListener('DOMContentLoaded', () => {
         viewerControlBar.classList.add('hidden');
         inputTargetId.disabled = false;
 
+        document.getElementById('viewer-console-wrapper').classList.add('hidden');
+        document.querySelector('.viewer-grid').classList.remove('with-console');
+
         connectionStatus.textContent = 'Desconectado';
-        connectionStatus.className = 'badge badge-gray';
         console.log('[VIEWER] Conexão desconectada e limpa.');
     }
 
@@ -339,7 +619,7 @@ document.addEventListener('DOMContentLoaded', () => {
             reconnectTimeout = null;
         }
         if (localAgentSocket) {
-            localAgentSocket.onclose = null; // Evita loop de reconexão
+            localAgentSocket.onclose = null;
             localAgentSocket.close();
             localAgentSocket = null;
         }
@@ -356,8 +636,26 @@ document.addEventListener('DOMContentLoaded', () => {
     function sendControlEvent(eventObj) {
         if (!toggleControlEnabled.checked) return;
         if (currentDataConnection && currentDataConnection.open) {
-            // PERFORMANCE: Serializar para string antes de enviar evita overhead do PeerJS serializando objeto
             currentDataConnection.send(JSON.stringify(eventObj));
+            
+            // Adicionar ao painel de logs do Viewer
+            let desc = '';
+            if (eventObj.type === 'mousemove') {
+                desc = `MouseMove (${eventObj.x.toFixed(3)}, ${eventObj.y.toFixed(3)})`;
+            } else if (eventObj.type === 'mousedown') {
+                desc = `MouseDown: ${eventObj.button}`;
+            } else if (eventObj.type === 'mouseup') {
+                desc = `MouseUp: ${eventObj.button}`;
+            } else if (eventObj.type === 'scroll') {
+                desc = `Scroll: ${eventObj.deltaY}`;
+            } else if (eventObj.type === 'keydown') {
+                desc = `KeyDown: ${eventObj.key}`;
+            } else if (eventObj.type === 'keyup') {
+                desc = `KeyUp: ${eventObj.key}`;
+            } else {
+                desc = eventObj.type;
+            }
+            logViewerEvent(`Enviado: ${desc}`, 'action');
         }
     }
 
