@@ -59,7 +59,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- Lógica do Agente Python Local (WebSocket) ---
     function connectLocalAgent() {
-        if (localAgentSocket && localAgentSocket.readyState === WebSocket.OPEN) return;
+        if (localAgentSocket && (localAgentSocket.readyState === WebSocket.OPEN || localAgentSocket.readyState === WebSocket.CONNECTING)) return;
 
         agentStatus.textContent = 'Conectando...';
         agentStatus.className = 'badge badge-gray';
@@ -178,6 +178,10 @@ document.addEventListener('DOMContentLoaded', () => {
             localStream.getTracks().forEach(track => track.stop());
             localStream = null;
         }
+        if (currentCall) {
+            currentCall.close();
+            currentCall = null;
+        }
         localVideoPreview.srcObject = null;
         localVideoPreview.classList.add('hidden');
         
@@ -186,13 +190,118 @@ document.addEventListener('DOMContentLoaded', () => {
         console.log('[STREAMER] Transmissão parada.');
     }
 
-    // Placeholder para os métodos do visualizador que serão adicionados na Task 5
     function initViewerMode() {
-        console.log('[VIEWER] Inicialização temporária.');
+        if (!peer) {
+            // Cria um ID temporário e curto para o visualizador
+            const viewerId = 'telestream-view-' + Math.random().toString(36).substring(2, 8);
+            peer = new Peer(viewerId);
+
+            peer.on('error', (err) => {
+                console.error('[VIEWER] Erro PeerJS:', err);
+                connectionStatus.textContent = 'Erro';
+                connectionStatus.className = 'badge badge-red';
+            });
+        }
+    }
+
+    btnConnectStream.addEventListener('click', () => {
+        const targetId = inputTargetId.value.trim();
+        if (!targetId) {
+            alert('Por favor, insira o ID do Transmissor.');
+            return;
+        }
+
+        connectionStatus.textContent = 'Conectando...';
+        connectionStatus.className = 'badge badge-gray';
+
+        console.log('[VIEWER] Conectando ao ID:', targetId);
+
+        // 1. Abre a conexão de dados (DataChannel)
+        currentDataConnection = peer.connect(targetId);
+
+        currentDataConnection.on('open', () => {
+            console.log('[VIEWER] Conexão de dados aberta!');
+            connectionStatus.textContent = 'Conectado';
+            connectionStatus.className = 'badge badge-green';
+            
+            btnConnectStream.classList.add('hidden');
+            btnDisconnectStream.classList.remove('hidden');
+            viewerControlBar.classList.remove('hidden');
+            inputTargetId.disabled = true;
+        });
+
+        currentDataConnection.on('close', () => {
+            console.log('[VIEWER] Conexão de dados encerrada.');
+            disconnectViewer();
+        });
+
+        currentDataConnection.on('error', (err) => {
+            console.error('[VIEWER] Erro na conexão de dados:', err);
+            disconnectViewer();
+        });
+
+        // 2. Inicia chamada de mídia (requisita vídeo do streamer)
+        // Criamos uma stream silenciosa fake só para convencer o PeerJS a responder com a stream do streamer
+        navigator.mediaDevices.getUserMedia = navigator.mediaDevices.getUserMedia || navigator.mediaDevices.webkitGetUserMedia || navigator.mediaDevices.mozGetUserMedia;
+        
+        const canvas = document.createElement('canvas');
+        canvas.width = 10;
+        canvas.height = 10;
+        const dummyStream = canvas.captureStream(1);
+        
+        const call = peer.call(targetId, dummyStream);
+        
+        call.on('stream', (remoteStream) => {
+            console.log('[VIEWER] Recebeu stream de vídeo do transmissor.');
+            remoteVideo.srcObject = remoteStream;
+            remoteVideo.classList.remove('hidden');
+            videoPlaceholder.classList.add('hidden');
+        });
+
+        call.on('close', () => {
+            console.log('[VIEWER] Chamada de vídeo finalizada.');
+            disconnectViewer();
+        });
+
+        call.on('error', (err) => {
+            console.error('[VIEWER] Erro na chamada de vídeo:', err);
+            disconnectViewer();
+        });
+
+        currentCall = call;
+    });
+
+    btnDisconnectStream.addEventListener('click', () => {
+        disconnectViewer();
+    });
+
+    function disconnectViewer() {
+        if (currentCall) {
+            currentCall.close();
+            currentCall = null;
+        }
+        if (currentDataConnection) {
+            currentDataConnection.close();
+            currentDataConnection = null;
+        }
+
+        remoteVideo.srcObject = null;
+        remoteVideo.classList.add('hidden');
+        videoPlaceholder.classList.remove('hidden');
+        
+        btnConnectStream.classList.remove('hidden');
+        btnDisconnectStream.classList.add('hidden');
+        viewerControlBar.classList.add('hidden');
+        inputTargetId.disabled = false;
+
+        connectionStatus.textContent = 'Desconectado';
+        connectionStatus.className = 'badge badge-gray';
+        console.log('[VIEWER] Conexão desconectada e limpa.');
     }
 
     function cleanupAll() {
         stopStream();
+        disconnectViewer();
         
         if (reconnectTimeout) {
             clearTimeout(reconnectTimeout);
@@ -211,4 +320,111 @@ document.addEventListener('DOMContentLoaded', () => {
             peer = null;
         }
     }
+
+    // --- Captura de Eventos de Input no Vídeo ---
+    function sendControlEvent(eventObj) {
+        if (!toggleControlEnabled.checked) return;
+        if (currentDataConnection && currentDataConnection.open) {
+            currentDataConnection.send(eventObj);
+        }
+    }
+
+    // 1. Mouse Move e Cliques
+    remoteVideo.addEventListener('mousemove', (e) => {
+        const rect = remoteVideo.getBoundingClientRect();
+        const rx = (e.clientX - rect.left) / rect.width;
+        const ry = (e.clientY - rect.top) / rect.height;
+
+        const x = Math.max(0, Math.min(1, rx));
+        const y = Math.max(0, Math.min(1, ry));
+
+        sendControlEvent({
+            type: 'mousemove',
+            x: x,
+            y: y
+        });
+    });
+
+    const mouseButtons = { 0: 'left', 1: 'middle', 2: 'right' };
+
+    remoteVideo.addEventListener('mousedown', (e) => {
+        const button = mouseButtons[e.button];
+        if (button) {
+            sendControlEvent({
+                type: 'mousedown',
+                button: button
+            });
+        }
+    });
+
+    remoteVideo.addEventListener('mouseup', (e) => {
+        const button = mouseButtons[e.button];
+        if (button) {
+            sendControlEvent({
+                type: 'mouseup',
+                button: button
+            });
+        }
+    });
+
+    remoteVideo.addEventListener('contextmenu', (e) => {
+        if (toggleControlEnabled.checked) {
+            e.preventDefault();
+        }
+    });
+
+    // 2. Rolagem de tela (Scroll)
+    remoteVideo.addEventListener('wheel', (e) => {
+        if (toggleControlEnabled.checked) {
+            e.preventDefault();
+            sendControlEvent({
+                type: 'scroll',
+                deltaY: e.deltaY
+            });
+        }
+    }, { passive: false });
+
+    // 3. Captura do Teclado
+    let mouseOverVideo = false;
+    remoteVideo.addEventListener('mouseenter', () => { mouseOverVideo = true; });
+    remoteVideo.addEventListener('mouseleave', () => { mouseOverVideo = false; });
+
+    const keyMap = {
+        'ArrowUp': 'up',
+        'ArrowDown': 'down',
+        'ArrowLeft': 'left',
+        'ArrowRight': 'right',
+        'Enter': 'enter',
+        'Backspace': 'backspace',
+        'Tab': 'tab',
+        'Escape': 'escape',
+        'Shift': 'shift',
+        'Control': 'ctrl',
+        'Alt': 'alt',
+        ' ': 'space'
+    };
+
+    window.addEventListener('keydown', (e) => {
+        if (!toggleControlEnabled.checked || !mouseOverVideo) return;
+        
+        if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab'].includes(e.key) || e.key === ' ') {
+            e.preventDefault();
+        }
+
+        const key = keyMap[e.key] || e.key.toLowerCase();
+        sendControlEvent({
+            type: 'keydown',
+            key: key
+        });
+    });
+
+    window.addEventListener('keyup', (e) => {
+        if (!toggleControlEnabled.checked || !mouseOverVideo) return;
+
+        const key = keyMap[e.key] || e.key.toLowerCase();
+        sendControlEvent({
+            type: 'keyup',
+            key: key
+        });
+    });
 });
