@@ -392,6 +392,8 @@ async def run_peerjs_signaling(peer_id):
                             src = data["src"]
                             payload = data["payload"]
                             sdp = payload["sdp"]
+                            if isinstance(sdp, dict):
+                                sdp = sdp.get("sdp")
                             
                             print(f"[AGENTE] Conexão WebRTC requisitada pelo Viewer: {src}")
                             
