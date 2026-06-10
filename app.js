@@ -35,7 +35,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentDataConnection = null;
     let reconnectTimeout = null;
     let lastMouseMoveTime = 0;
-    const MOUSE_MOVE_THROTTLE_MS = 33; // ~30 vezes por segundo (30Hz)
+    const MOUSE_MOVE_THROTTLE_MS = 16; // ~60 vezes por segundo (60Hz) - mais responsivo
 
     // Navegação do Hub
     btnSelectStreamer.addEventListener('click', () => {
@@ -107,9 +107,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 activeConnections.push(conn);
                 
                 conn.on('data', (data) => {
-                    // Se o websocket local estiver aberto, encaminha os comandos de input
+                    // PERFORMANCE: O viewer envia JSON string, repassar diretamente sem re-serializar
                     if (localAgentSocket && localAgentSocket.readyState === WebSocket.OPEN) {
-                        localAgentSocket.send(JSON.stringify(data));
+                        // Se já é string, enviar direto. Se é objeto (fallback), serializar
+                        const payload = typeof data === 'string' ? data : JSON.stringify(data);
+                        localAgentSocket.send(payload);
                     } else {
                         console.warn('[STREAMER] Recebeu comando, mas o agente Python não está conectado.');
                     }
@@ -142,10 +144,14 @@ document.addEventListener('DOMContentLoaded', () => {
     btnStartStream.addEventListener('click', async () => {
         try {
             // Requisitar tela ao navegador
+            // PERFORMANCE: Limitar resolução a 1080p e priorizar framerate alto
+            // Resoluções maiores (4K, 1440p) causam lag na codificação e transmissão
             localStream = await navigator.mediaDevices.getDisplayMedia({
                 video: {
                     cursor: "always",
-                    frameRate: { ideal: 30, max: 60 }
+                    width: { ideal: 1920, max: 1920 },
+                    height: { ideal: 1080, max: 1080 },
+                    frameRate: { ideal: 60, max: 60 }
                 },
                 audio: false
             });
@@ -219,7 +225,12 @@ document.addEventListener('DOMContentLoaded', () => {
         console.log('[VIEWER] Conectando ao ID:', targetId);
 
         // 1. Abre a conexão de dados (DataChannel)
-        currentDataConnection = peer.connect(targetId);
+        // PERFORMANCE: reliable:false = modo UDP (sem re-transmissão de pacotes perdidos)
+        // Para inputs de mouse, um pacote perdido é melhor ignorar do que esperar - reduz latência massivamente
+        currentDataConnection = peer.connect(targetId, {
+            reliable: false,
+            serialization: 'none'
+        });
 
         currentDataConnection.on('open', () => {
             console.log('[VIEWER] Conexão de dados aberta!');
@@ -327,7 +338,8 @@ document.addEventListener('DOMContentLoaded', () => {
     function sendControlEvent(eventObj) {
         if (!toggleControlEnabled.checked) return;
         if (currentDataConnection && currentDataConnection.open) {
-            currentDataConnection.send(eventObj);
+            // PERFORMANCE: Serializar para string antes de enviar evita overhead do PeerJS serializando objeto
+            currentDataConnection.send(JSON.stringify(eventObj));
         }
     }
 

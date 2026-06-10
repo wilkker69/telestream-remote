@@ -166,9 +166,9 @@ def test_handle_client_coordinate_clamping():
             # 2. (1.0 * 1000, 1.0 * 1000) -> (1000, 1000) clamped -> (998, 998)
             # 3. (-0.5 * 1000, 1.5 * 1000) -> (-500, 1500) clamped -> (1, 998)
             assert mock_move_to.call_count == 3
-            mock_move_to.assert_any_call(1, 1)
-            mock_move_to.assert_any_call(998, 998)
-            mock_move_to.assert_any_call(1, 998)
+            mock_move_to.assert_any_call(1, 1, duration=0)
+            mock_move_to.assert_any_call(998, 998, duration=0)
+            mock_move_to.assert_any_call(1, 998, duration=0)
 
     asyncio.run(run_test())
     

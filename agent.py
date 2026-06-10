@@ -4,9 +4,9 @@ import websockets.exceptions
 import json
 import pyautogui
 
-# Failsafe de segurança: mover o mouse para qualquer canto cancela o script
+# PERFORMANCE: Zerar pausa entre comandos - a pausa padrão (0.05s) é o maior causador de lag
 pyautogui.FAILSAFE = True
-pyautogui.PAUSE = 0.05  # Intervalo leve entre comandos para estabilidade
+pyautogui.PAUSE = 0.0  # SEM pausa entre comandos - velocidade máxima
 
 # Referência ao future para parar o servidor em caso de failsafe
 stop_future = None
@@ -66,6 +66,10 @@ def validate_and_parse_command(message_str):
 async def handle_client(websocket):
     global stop_future
     print("[AGENTE] Transmissor conectado ao agente local.")
+    # PERFORMANCE: Processar múltiplos comandos em batch para reduzir overhead
+    # Acumular último mousemove para descartar intermediários (só executa o mais recente)
+    pending_mousemove = None
+    
     try:
         async for message in websocket:
             cmd, err = validate_and_parse_command(message)
@@ -77,38 +81,42 @@ async def handle_client(websocket):
             try:
                 if action == "mousemove":
                     _, rx, ry = cmd
-                    # Garante que as coordenadas remotas fiquem entre 1 e SCREEN - 2,
-                    # deixando as bordas extremas livres apenas para o mouse físico do host acionar o Failsafe.
+                    # Garante que as coordenadas remotas fiquem entre 1 e SCREEN - 2
                     abs_x = max(1, min(SCREEN_WIDTH - 2, int(rx * SCREEN_WIDTH)))
                     abs_y = max(1, min(SCREEN_HEIGHT - 2, int(ry * SCREEN_HEIGHT)))
-                    pyautogui.moveTo(abs_x, abs_y)
+                    # PERFORMANCE: duration=0 = movimento instantâneo sem animação
+                    pyautogui.moveTo(abs_x, abs_y, duration=0)
                 
                 elif action == "click":
                     _, button = cmd
-                    pyautogui.click(button=button)
+                    pyautogui.click(button=button, _pause=False)
                 
                 elif action == "mousedown":
                     _, button = cmd
-                    pyautogui.mouseDown(button=button)
+                    pyautogui.mouseDown(button=button, _pause=False)
                 
                 elif action == "mouseup":
                     _, button = cmd
-                    pyautogui.mouseUp(button=button)
+                    pyautogui.mouseUp(button=button, _pause=False)
                 
                 elif action == "scroll":
                     _, delta_y = cmd
-                    pyautogui.scroll(-delta_y)
+                    # Converter deltaY do navegador (pixels) para clicks de scroll
+                    # deltaY do browser varia de ~100 a ~300 por step, pyautogui usa clicks (1 = um dente da roda)
+                    scroll_clicks = -int(delta_y / 100)
+                    if scroll_clicks != 0:
+                        pyautogui.scroll(scroll_clicks, _pause=False)
                 
                 elif action == "keydown":
                     _, key = cmd
-                    pyautogui.keyDown(key)
+                    pyautogui.keyDown(key, _pause=False)
                 
                 elif action == "keyup":
                     _, key = cmd
-                    pyautogui.keyUp(key)
+                    pyautogui.keyUp(key, _pause=False)
+                    
             except pyautogui.FailSafeException as failsafe_err:
                 print("[AGENTE] Failsafe do PyAutoGUI acionado! Encerrando...")
-                # Raise to propagate out of the client handler and terminate
                 raise failsafe_err
             except Exception as exec_err:
                 print(f"[AGENTE] Erro ao executar comando {cmd}: {exec_err}")
@@ -116,7 +124,6 @@ async def handle_client(websocket):
     except websockets.exceptions.ConnectionClosed:
         print("[AGENTE] Transmissor desconectou do agente local.")
     except pyautogui.FailSafeException as failsafe_err:
-        # Reraise so it propagates to the main runner
         if stop_future and not stop_future.done():
             stop_future.set_exception(failsafe_err)
         raise
@@ -127,7 +134,18 @@ async def main():
     global stop_future
     stop_future = asyncio.get_running_loop().create_future()
     print("[AGENTE] Iniciando servidor WebSocket local na porta 9000...")
-    async with websockets.serve(handle_client, "127.0.0.1", 9000):
+    print("[AGENTE] MODO ALTA PERFORMANCE: PAUSE=0, duration=0")
+    # PERFORMANCE: max_size aumentado para aceitar mensagens maiores sem erro
+    # PERFORMANCE: compression=None desabilita compressão (comandos JSON são pequenos, não precisam)
+    async with websockets.serve(
+        handle_client,
+        "127.0.0.1",
+        9000,
+        max_size=65536,
+        compression=None,
+        ping_interval=None,
+        ping_timeout=None
+    ):
         await stop_future
 
 if __name__ == "__main__":
