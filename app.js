@@ -36,7 +36,9 @@ document.addEventListener('DOMContentLoaded', () => {
     let activeConnections = [];
     let localAgentSocket = null;
     let currentCall = null;
-    let currentDataConnection = null;
+    let currentDataConnection = null;  // Canal de dados do Viewer (RTCDataChannel nativo)
+    let rtcPeerConnection = null;       // Conexão WebRTC nativa do Viewer (RTCPeerConnection)
+    let signalingWebsocket = null;      // WebSocket temporário de sinalização do Viewer
     let reconnectTimeout = null;
     let lastMouseMoveTime = 0;
     const MOUSE_MOVE_THROTTLE_MS = 16; // ~60 vezes por segundo (60Hz) - mais responsivo
@@ -354,17 +356,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- Lógica do Visualizador (Viewer) ---
     function initViewerMode() {
-        if (!peer) {
-            const viewerId = 'telestream-view-' + Math.random().toString(36).substring(2, 8);
-            peer = new Peer(viewerId);
-
-            peer.on('error', (err) => {
-                console.error('[VIEWER] Erro PeerJS:', err);
-                connectionStatus.textContent = 'Erro';
-                connectionStatus.className = 'badge-text';
-                document.getElementById('viewer-pulse-dot').className = 'pulse-dot red';
-            });
-        }
+        // Modo viewer agora usa RTCPeerConnection direta. Apenas logar.
+        console.log('[VIEWER] Modo Visualizador ativo. Pronto para conexões P2P.');
     }
 
     // Monitoramento de FPS e Latência em Tempo Real via WebRTC Stats
@@ -419,8 +412,9 @@ document.addEventListener('DOMContentLoaded', () => {
                             if (pulseDot) {
                                 if (latencyMs < 50) {
                                     pulseDot.className = 'pulse-dot green';
+                                    pulseDot.style.backgroundColor = '';
                                 } else if (latencyMs < 150) {
-                                    pulseDot.className = 'pulse-dot yellow'; // no CSS, a pulse-dot amarela herda outra animação se necessário
+                                    pulseDot.className = 'pulse-dot yellow';
                                     pulseDot.style.backgroundColor = 'var(--accent-yellow)';
                                 } else {
                                     pulseDot.className = 'pulse-dot red';
@@ -498,6 +492,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    // Conectar ao Agente Nativo WebRTC
     btnConnectStream.addEventListener('click', () => {
         const targetId = inputTargetId.value.trim();
         if (!targetId) {
@@ -506,76 +501,143 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         connectionStatus.textContent = 'Conectando...';
-        document.getElementById('viewer-pulse-dot').className = 'pulse-dot red'; // piscando vermelho durante handshake
+        document.getElementById('viewer-pulse-dot').className = 'pulse-dot red';
+        logViewerEvent(`Estabelecendo conexão WebRTC direta com: ${targetId}...`, 'info');
 
-        console.log('[VIEWER] Conectando ao ID:', targetId);
+        try {
+            // 1. Criar a RTCPeerConnection
+            rtcPeerConnection = new RTCPeerConnection({
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' }
+                ]
+            });
 
-        // 1. Abre a conexão de dados (DataChannel)
-        currentDataConnection = peer.connect(targetId);
+            // 2. Criar canal de dados para os comandos
+            currentDataConnection = rtcPeerConnection.createDataChannel('control', {
+                ordered: true
+            });
 
-        currentDataConnection.on('open', () => {
-            console.log('[VIEWER] Conexão de dados aberta!');
-            connectionStatus.textContent = 'Conectado';
-            document.getElementById('viewer-pulse-dot').className = 'pulse-dot green';
+            currentDataConnection.onopen = () => {
+                console.log('[VIEWER] Canal de controle aberto!');
+                connectionStatus.textContent = 'Conectado';
+                document.getElementById('viewer-pulse-dot').className = 'pulse-dot green';
+                
+                btnConnectStream.classList.add('hidden');
+                btnDisconnectStream.classList.remove('hidden');
+                viewerControlBar.classList.remove('hidden');
+                inputTargetId.disabled = true;
+
+                logViewerEvent(`Canal de dados aberto. Controle remoto ativo.`, 'info');
+                if (toggleControlEnabled.checked) {
+                    document.getElementById('viewer-console-wrapper').classList.remove('hidden');
+                    document.querySelector('.viewer-grid').classList.add('with-console');
+                }
+            };
+
+            currentDataConnection.onclose = () => {
+                console.log('[VIEWER] Canal de controle fechado.');
+                logViewerEvent('Conexão de controle encerrada.', 'warn');
+                disconnectViewer();
+            };
+
+            currentDataConnection.onerror = (err) => {
+                console.error('[VIEWER] Erro no canal de dados:', err);
+                logViewerEvent(`Erro no canal de dados: ${err.message}`, 'warn');
+                disconnectViewer();
+            };
+
+            // 3. Capturar track de vídeo recebida do Python
+            rtcPeerConnection.ontrack = (event) => {
+                console.log('[VIEWER] Track de vídeo remota recebida.');
+                logViewerEvent('Stream de vídeo nativo recebido via WebRTC.', 'info');
+                
+                remoteVideo.srcObject = event.streams[0] || (event.track ? new MediaStream([event.track]) : null);
+                remoteVideo.classList.remove('hidden');
+                videoPlaceholder.classList.add('hidden');
+                
+                // Iniciar estatísticas reais do WebRTC
+                startStatsMonitoring(rtcPeerConnection);
+            };
+
+            // 4. Solicitar recebimento de vídeo
+            rtcPeerConnection.addTransceiver('video', { direction: 'recvonly' });
+
+            // 5. Canal de sinalização temporário via WebSocket público do PeerJS
+            const viewerId = 'telestream-view-' + Math.random().toString(36).substring(2, 8);
+            const token = Math.random().toString(36).substring(2, 8);
+            const wsUrl = `wss://0.peerjs.com/peerjs?key=peerjs&id=${viewerId}&token=${token}&version=1.5.2`;
             
-            btnConnectStream.classList.add('hidden');
-            btnDisconnectStream.classList.remove('hidden');
-            viewerControlBar.classList.remove('hidden');
-            inputTargetId.disabled = true;
+            signalingWebsocket = new WebSocket(wsUrl);
 
-            logViewerEvent(`Conectado ao transmissor: ${targetId}`, 'info');
-            if (toggleControlEnabled.checked) {
-                document.getElementById('viewer-console-wrapper').classList.remove('hidden');
-                document.querySelector('.viewer-grid').classList.add('with-console');
-            }
-        });
+            signalingWebsocket.onopen = async () => {
+                console.log('[VIEWER] Canal de sinalização WebSocket conectado.');
+                
+                // Criar oferta SDP
+                const offer = await rtcPeerConnection.createOffer();
+                await rtcPeerConnection.setLocalDescription(offer);
 
-        currentDataConnection.on('close', () => {
-            console.log('[VIEWER] Conexão de dados encerrada.');
-            logViewerEvent('Conexão de dados encerrada pelo parceiro.', 'warn');
+                // Esperar a coleta de candidatos ICE se completar
+                rtcPeerConnection.onicegatheringstatechange = () => {
+                    if (rtcPeerConnection.iceGatheringState === 'complete') {
+                        console.log('[VIEWER] ICE Gathering completo. Enviando oferta SDP...');
+                        signalingWebsocket.send(JSON.stringify({
+                            type: 'OFFER',
+                            src: viewerId,
+                            dst: targetId,
+                            payload: {
+                                type: 'offer',
+                                sdp: rtcPeerConnection.localDescription.sdp
+                            }
+                        }));
+                    }
+                };
+                
+                if (rtcPeerConnection.iceGatheringState === 'complete') {
+                    signalingWebsocket.send(JSON.stringify({
+                        type: 'OFFER',
+                        src: viewerId,
+                        dst: targetId,
+                        payload: {
+                            type: 'offer',
+                            sdp: rtcPeerConnection.localDescription.sdp
+                        }
+                    }));
+                }
+            };
+
+            signalingWebsocket.onmessage = async (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'ANSWER') {
+                        console.log('[VIEWER] Resposta SDP remota recebida.');
+                        await rtcPeerConnection.setRemoteDescription(new RTCSessionDescription({
+                            type: 'answer',
+                            sdp: data.payload.sdp
+                        }));
+                        logViewerEvent('Conexão P2P negociada com sucesso!', 'info');
+                        
+                        // Fechar canal de sinalização - o P2P já está estabelecido!
+                        signalingWebsocket.close();
+                        signalingWebsocket = null;
+                    }
+                } catch (err) {
+                    console.error('[VIEWER] Erro na sinalização:', err);
+                }
+            };
+
+            signalingWebsocket.onerror = (err) => {
+                console.error('[VIEWER] Erro de sinalização:', err);
+                logViewerEvent('Falha na sinalização WebSocket pública.', 'warn');
+                disconnectViewer();
+            };
+
+        } catch (err) {
+            console.error('[VIEWER] Falha ao conectar:', err);
+            logViewerEvent(`Falha na conexão: ${err.message}`, 'warn');
+            alert('Erro ao iniciar a conexão.');
             disconnectViewer();
-        });
-
-        currentDataConnection.on('error', (err) => {
-            console.error('[VIEWER] Erro na conexão de dados:', err);
-            logViewerEvent(`Erro na conexão de dados: ${err.message}`, 'warn');
-            disconnectViewer();
-        });
-
-        // 2. Inicia chamada de mídia (requisita vídeo do streamer)
-        navigator.mediaDevices.getUserMedia = navigator.mediaDevices.getUserMedia || navigator.mediaDevices.webkitGetUserMedia || navigator.mediaDevices.mozGetUserMedia;
-        
-        const canvas = document.createElement('canvas');
-        canvas.width = 10;
-        canvas.height = 10;
-        const dummyStream = canvas.captureStream(1);
-        
-        const call = peer.call(targetId, dummyStream);
-        
-        call.on('stream', (remoteStream) => {
-            console.log('[VIEWER] Recebeu stream de vídeo do transmissor.');
-            logViewerEvent('Stream de vídeo recebido com sucesso via WebRTC.', 'info');
-            remoteVideo.srcObject = remoteStream;
-            remoteVideo.classList.remove('hidden');
-            videoPlaceholder.classList.add('hidden');
-            
-            // Iniciar coleta de FPS e RTT
-            if (call.peerConnection) {
-                startStatsMonitoring(call.peerConnection);
-            }
-        });
-
-        call.on('close', () => {
-            console.log('[VIEWER] Chamada de vídeo finalizada.');
-            disconnectViewer();
-        });
-
-        call.on('error', (err) => {
-            console.error('[VIEWER] Erro na chamada de vídeo:', err);
-            disconnectViewer();
-        });
-
-        currentCall = call;
+        }
     });
 
     btnDisconnectStream.addEventListener('click', () => {
@@ -589,9 +651,20 @@ document.addEventListener('DOMContentLoaded', () => {
             currentCall.close();
             currentCall = null;
         }
+        
         if (currentDataConnection) {
             currentDataConnection.close();
             currentDataConnection = null;
+        }
+        
+        if (rtcPeerConnection) {
+            rtcPeerConnection.close();
+            rtcPeerConnection = null;
+        }
+        
+        if (signalingWebsocket) {
+            signalingWebsocket.close();
+            signalingWebsocket = null;
         }
 
         remoteVideo.srcObject = null;
@@ -635,7 +708,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- Captura de Eventos de Input no Vídeo ---
     function sendControlEvent(eventObj) {
         if (!toggleControlEnabled.checked) return;
-        if (currentDataConnection && currentDataConnection.open) {
+        
+        // No RTCDataChannel nativo usamos readyState === 'open'
+        if (currentDataConnection && currentDataConnection.readyState === 'open') {
             currentDataConnection.send(JSON.stringify(eventObj));
             
             // Adicionar ao painel de logs do Viewer

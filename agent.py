@@ -1,10 +1,19 @@
 import asyncio
+import json
+import random
+import string
+import sys
+import time
+import ctypes
+import pyautogui
 import websockets
 import websockets.exceptions
-import json
-import pyautogui
-import sys
-import ctypes
+import mss
+import numpy as np
+import av
+from PIL import Image
+from fractions import Fraction
+from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, RTCConfiguration, RTCIceServer
 
 # PERFORMANCE: Zerar pausa entre comandos - a pausa padrão (0.05s) é o maior causador de lag
 pyautogui.FAILSAFE = True
@@ -208,64 +217,59 @@ def validate_and_parse_command(message_str):
     
     return None, "Tipo desconhecido"
 
+def handle_incoming_command(message_str):
+    cmd, err = validate_and_parse_command(message_str)
+    if err:
+        print(f"[AGENTE] Comando inválido recebido: {err} ({message_str})")
+        return
+    
+    action = cmd[0]
+    try:
+        if action == "mousemove":
+            _, rx, ry = cmd
+            abs_x = max(1, min(SCREEN_WIDTH - 2, int(rx * SCREEN_WIDTH)))
+            abs_y = max(1, min(SCREEN_HEIGHT - 2, int(ry * SCREEN_HEIGHT)))
+            pyautogui.moveTo(abs_x, abs_y, duration=0)
+        
+        elif action == "click":
+            _, button = cmd
+            pyautogui.click(button=button, _pause=False)
+        
+        elif action == "mousedown":
+            _, button = cmd
+            pyautogui.mouseDown(button=button, _pause=False)
+        
+        elif action == "mouseup":
+            _, button = cmd
+            pyautogui.mouseUp(button=button, _pause=False)
+        
+        elif action == "scroll":
+            _, delta_y = cmd
+            scroll_clicks = -int(delta_y / 100)
+            if scroll_clicks != 0:
+                pyautogui.scroll(scroll_clicks, _pause=False)
+        
+        elif action == "keydown":
+            _, key = cmd
+            pyautogui.keyDown(key, _pause=False)
+        
+        elif action == "keyup":
+            _, key = cmd
+            pyautogui.keyUp(key, _pause=False)
+            
+    except pyautogui.FailSafeException as failsafe_err:
+        print("[AGENTE] Failsafe do PyAutoGUI acionado! Encerrando...")
+        raise failsafe_err
+    except Exception as exec_err:
+        print(f"[AGENTE] Erro ao executar comando {cmd}: {exec_err}")
+
+# --- BACKEND LEGADO: Websocket Local ---
 async def handle_client(websocket):
     global stop_future
-    print("[AGENTE] Transmissor conectado ao agente local.")
-    # PERFORMANCE: Processar múltiplos comandos em batch para reduzir overhead
-    # Acumular último mousemove para descartar intermediários (só executa o mais recente)
-    pending_mousemove = None
-    
+    print("[AGENTE] Transmissor conectado ao agente local via WebSocket legado.")
     try:
         async for message in websocket:
-            cmd, err = validate_and_parse_command(message)
-            if err:
-                print(f"[AGENTE] Comando inválido recebido: {err} ({message})")
-                continue
-            
-            action = cmd[0]
-            try:
-                if action == "mousemove":
-                    _, rx, ry = cmd
-                    # Garante que as coordenadas remotas fiquem entre 1 e SCREEN - 2
-                    abs_x = max(1, min(SCREEN_WIDTH - 2, int(rx * SCREEN_WIDTH)))
-                    abs_y = max(1, min(SCREEN_HEIGHT - 2, int(ry * SCREEN_HEIGHT)))
-                    # PERFORMANCE: duration=0 = movimento instantâneo sem animação
-                    pyautogui.moveTo(abs_x, abs_y, duration=0)
-                
-                elif action == "click":
-                    _, button = cmd
-                    pyautogui.click(button=button, _pause=False)
-                
-                elif action == "mousedown":
-                    _, button = cmd
-                    pyautogui.mouseDown(button=button, _pause=False)
-                
-                elif action == "mouseup":
-                    _, button = cmd
-                    pyautogui.mouseUp(button=button, _pause=False)
-                
-                elif action == "scroll":
-                    _, delta_y = cmd
-                    # Converter deltaY do navegador (pixels) para clicks de scroll
-                    # deltaY do browser varia de ~100 a ~300 por step, pyautogui usa clicks (1 = um dente da roda)
-                    scroll_clicks = -int(delta_y / 100)
-                    if scroll_clicks != 0:
-                        pyautogui.scroll(scroll_clicks, _pause=False)
-                
-                elif action == "keydown":
-                    _, key = cmd
-                    pyautogui.keyDown(key, _pause=False)
-                
-                elif action == "keyup":
-                    _, key = cmd
-                    pyautogui.keyUp(key, _pause=False)
-                    
-            except pyautogui.FailSafeException as failsafe_err:
-                print("[AGENTE] Failsafe do PyAutoGUI acionado! Encerrando...")
-                raise failsafe_err
-            except Exception as exec_err:
-                print(f"[AGENTE] Erro ao executar comando {cmd}: {exec_err}")
-                
+            handle_incoming_command(message)
     except websockets.exceptions.ConnectionClosed:
         print("[AGENTE] Transmissor desconectou do agente local.")
     except pyautogui.FailSafeException as failsafe_err:
@@ -273,16 +277,200 @@ async def handle_client(websocket):
             stop_future.set_exception(failsafe_err)
         raise
     except Exception as e:
-        print(f"[AGENTE] Erro durante a conexão: {e}")
+        print(f"[AGENTE] Erro durante a conexão WebSocket: {e}")
+
+# --- BACKEND ATIVO: WebRTC Nativo para Captura e Transmissão de Tela ---
+class ScreenCaptureTrack(MediaStreamTrack):
+    kind = "video"
+
+    def __init__(self):
+        super().__init__()
+        self.sct = mss.mss()
+        self.monitor = self.sct.monitors[1] # Monitor primário
+        self.width = self.monitor["width"]
+        self.height = self.monitor["height"]
+        
+        # Resolução máxima ideal para WebRTC (1080p)
+        self.max_width = 1920
+        self.max_height = 1080
+        
+        self.scale = 1.0
+        if self.width > self.max_width or self.height > self.max_height:
+            self.scale = min(self.max_width / self.width, self.max_height / self.height)
+            self.target_width = int(self.width * self.scale)
+            self.target_height = int(self.height * self.scale)
+        else:
+            self.target_width = self.width
+            self.target_height = self.height
+
+        # Garantir dimensões pares para compressão de vídeo H264
+        self.target_width = (self.target_width // 2) * 2
+        self.target_height = (self.target_height // 2) * 2
+
+        self.last_frame_time = 0
+        self.frame_duration = 1.0 / 60.0  # Alvo: 60 FPS
+        self._pts = 0
+        self._time_base = Fraction(1, 90000)
+        self._stopped = False
+
+    def stop(self):
+        self._stopped = True
+        super().stop()
+
+    async def recv(self):
+        if self._stopped:
+            raise av.AVError("Track stopped")
+
+        # Limitar taxa de FPS
+        now = time.time()
+        elapsed = now - self.last_frame_time
+        sleep_time = self.frame_duration - elapsed
+        if sleep_time > 0:
+            await asyncio.sleep(sleep_time)
+        self.last_frame_time = time.time()
+
+        # Capturar tela com mss
+        screenshot = self.sct.grab(self.monitor)
+        
+        # Converter para imagem do Pillow e redimensionar
+        img_pil = Image.frombytes("RGB", (screenshot.width, screenshot.height), screenshot.raw, "raw", "BGRX")
+        if self.scale != 1.0:
+            img_pil = img_pil.resize((self.target_width, self.target_height), Image.Resampling.BILINEAR)
+            
+        rgb_arr = np.array(img_pil)
+        frame = av.VideoFrame.from_ndarray(rgb_arr, format="rgb24")
+        
+        self._pts += int(90000 * self.frame_duration)
+        frame.pts = self._pts
+        frame.time_base = self._time_base
+        
+        return frame
+
+# Protocolo do PeerJS
+PEERJS_HOST = "0.peerjs.com"
+PEERJS_PATH = "/peerjs"
+PEERJS_KEY = "peerjs"
+
+async def run_peerjs_signaling(peer_id):
+    token = "".join(random.choices(string.ascii_lowercase + string.digits, k=16))
+    url = f"wss://{PEERJS_HOST}{PEERJS_PATH}?key={PEERJS_KEY}&id={peer_id}&token={token}&version=1.5.2"
+    
+    print(f"[AGENTE] Conectando ao servidor de sinalização PeerJS em {PEERJS_HOST}...")
+    
+    while True:
+        try:
+            async with websockets.connect(url, ping_interval=None) as ws:
+                print(f"[AGENTE] Conexão com sinalização estabelecida!")
+                print(f"================================================================")
+                print(f"  CHAVE DE CONEXÃO: {peer_id}")
+                print(f"  Acesse: https://wilkker69.github.io/telestream-remote/")
+                print(f"================================================================")
+                
+                async def keep_alive():
+                    try:
+                        while True:
+                            await asyncio.sleep(20)
+                            await ws.send(json.dumps({"type": "HEARTBEAT"}))
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        pass
+                
+                keep_alive_task = asyncio.create_task(keep_alive())
+                pc = None
+                track = None
+                
+                try:
+                    async for message in ws:
+                        data = json.loads(message)
+                        msg_type = data.get("type")
+                        
+                        if msg_type == "OPEN":
+                            pass
+                            
+                        elif msg_type == "OFFER":
+                            src = data["src"]
+                            payload = data["payload"]
+                            sdp = payload["sdp"]
+                            
+                            print(f"[AGENTE] Conexão WebRTC requisitada pelo Viewer: {src}")
+                            
+                            if pc:
+                                await pc.close()
+                                
+                            pc = RTCPeerConnection(RTCConfiguration(
+                                iceServers=[
+                                    RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
+                                    RTCIceServer(urls=["stun:stun1.l.google.com:19302"])
+                                ]
+                            ))
+                            
+                            track = ScreenCaptureTrack()
+                            pc.addTrack(track)
+                            
+                            @pc.on("datachannel")
+                            def on_datachannel(channel):
+                                print(f"[AGENTE] Canal de dados '{channel.label}' aberto pelo Viewer.")
+                                
+                                @channel.on("message")
+                                def on_message(msg):
+                                    handle_incoming_command(msg)
+                                    
+                                @channel.on("close")
+                                def on_close():
+                                    print("[AGENTE] Canal de dados fechado.")
+                                    if track:
+                                        track.stop()
+                            
+                            @pc.on("connectionstatechange")
+                            async def on_connectionstatechange():
+                                print(f"[AGENTE] Estado da conexão WebRTC alterado para: {pc.connectionState}")
+                                if pc.connectionState in ["closed", "failed", "disconnected"]:
+                                    if track:
+                                        track.stop()
+                                    print("[AGENTE] Conexão remota fechada.")
+                            
+                            await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
+                            
+                            answer = await pc.createAnswer()
+                            await pc.setLocalDescription(answer)
+                            
+                            print("[AGENTE] Coletando candidatos ICE locais...")
+                            while pc.iceGatheringState != "complete":
+                                await asyncio.sleep(0.05)
+                                
+                            await ws.send(json.dumps({
+                                "type": "ANSWER",
+                                "src": peer_id,
+                                "dst": src,
+                                "payload": {
+                                    "type": "answer",
+                                    "sdp": pc.localDescription.sdp
+                                }
+                            }))
+                            print(f"[AGENTE] Resposta de conexão enviada para {src}. Aguardando P2P...")
+                            
+                finally:
+                    keep_alive_task.cancel()
+                    if pc:
+                        await pc.close()
+                        
+        except Exception as e:
+            print(f"[AGENTE] [Erro de Rede] Desconectado da sinalização: {e}. Reconectando em 5 segundos...")
+            await asyncio.sleep(5)
 
 async def main():
     global stop_future
     stop_future = asyncio.get_running_loop().create_future()
-    print("[AGENTE] Iniciando servidor WebSocket local na porta 9000...")
-    print("[AGENTE] MODO ALTA PERFORMANCE: PAUSE=0, duration=0")
-    # PERFORMANCE: max_size aumentado para aceitar mensagens maiores sem erro
-    # PERFORMANCE: compression=None desabilita compressão (comandos JSON são pequenos, não precisam)
-    async with websockets.serve(
+    
+    # Gerar ID aleatório do PeerJS para conexão pública
+    peer_id = 'telestream-' + ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
+    
+    # Iniciar serviços simultâneos
+    print("[AGENTE] Iniciando serviços simultâneos...")
+    print("[AGENTE] 1. Servidor WebSocket legado na porta 9000 (Local)...")
+    
+    legacy_server = websockets.serve(
         handle_client,
         "127.0.0.1",
         9000,
@@ -290,8 +478,16 @@ async def main():
         compression=None,
         ping_interval=None,
         ping_timeout=None
-    ):
-        await stop_future
+    )
+    
+    try:
+        await asyncio.gather(
+            legacy_server,
+            run_peerjs_signaling(peer_id),
+            stop_future
+        )
+    except asyncio.CancelledError:
+        pass
 
 if __name__ == "__main__":
     try:
