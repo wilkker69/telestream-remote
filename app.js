@@ -500,21 +500,29 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
+        // --- PREVENÇÃO DE CLIQUES DUPLICADOS E LIMPEZA DE ESTADOS ---
+        btnConnectStream.disabled = true;
+        btnConnectStream.textContent = 'Conectando...';
+        inputTargetId.disabled = true;
+
+        disconnectViewer(); // Garante limpar instâncias antigas antes de prosseguir
+
         connectionStatus.textContent = 'Conectando...';
         document.getElementById('viewer-pulse-dot').className = 'pulse-dot red';
         logViewerEvent(`Estabelecendo conexão WebRTC direta com: ${targetId}...`, 'info');
 
         try {
-            // 1. Criar a RTCPeerConnection
-            rtcPeerConnection = new RTCPeerConnection({
+            // 1. Criar a RTCPeerConnection no escopo local
+            const pc = new RTCPeerConnection({
                 iceServers: [
                     { urls: 'stun:stun.l.google.com:19302' },
                     { urls: 'stun:stun1.l.google.com:19302' }
                 ]
             });
+            rtcPeerConnection = pc; // Atribui à variável de estado global
 
             // 2. Criar canal de dados para os comandos
-            currentDataConnection = rtcPeerConnection.createDataChannel('control', {
+            currentDataConnection = pc.createDataChannel('control', {
                 ordered: true
             });
 
@@ -548,7 +556,7 @@ document.addEventListener('DOMContentLoaded', () => {
             };
 
             // 3. Capturar track de vídeo recebida do Python
-            rtcPeerConnection.ontrack = (event) => {
+            pc.ontrack = (event) => {
                 console.log('[VIEWER] Track de vídeo remota recebida.');
                 logViewerEvent('Stream de vídeo nativo recebido via WebRTC.', 'info');
                 
@@ -556,12 +564,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 remoteVideo.classList.remove('hidden');
                 videoPlaceholder.classList.add('hidden');
                 
-                // Iniciar estatísticas reais do WebRTC
-                startStatsMonitoring(rtcPeerConnection);
+                // Iniciar estatísticas reais do WebRTC usando a referência local segura
+                startStatsMonitoring(pc);
             };
 
             // 4. Solicitar recebimento de vídeo
-            rtcPeerConnection.addTransceiver('video', { direction: 'recvonly' });
+            pc.addTransceiver('video', { direction: 'recvonly' });
 
             // 5. Canal de sinalização temporário via WebSocket público do PeerJS
             const viewerId = 'telestream-view-' + Math.random().toString(36).substring(2, 8);
@@ -583,13 +591,16 @@ document.addEventListener('DOMContentLoaded', () => {
                         console.log('[VIEWER] ID registrado com sucesso no servidor de sinalização!');
                         logViewerEvent('Sinalização ativa. Iniciando handshake WebRTC...', 'info');
                         
+                        if (pc.signalingState === 'closed') return;
+
                         // Gerar oferta SDP
-                        const offer = await rtcPeerConnection.createOffer();
-                        await rtcPeerConnection.setLocalDescription(offer);
+                        const offer = await pc.createOffer();
+                        await pc.setLocalDescription(offer);
 
                         // Configurar envio do SDP quando a coleta de ICE terminar
-                        rtcPeerConnection.onicegatheringstatechange = () => {
-                            if (rtcPeerConnection.iceGatheringState === 'complete') {
+                        pc.onicegatheringstatechange = () => {
+                            if (pc.signalingState === 'closed') return;
+                            if (pc.iceGatheringState === 'complete' && pc.localDescription) {
                                 console.log('[VIEWER] ICE Gathering completo. Enviando oferta SDP...');
                                 sendSignal({
                                     type: 'OFFER',
@@ -597,20 +608,20 @@ document.addEventListener('DOMContentLoaded', () => {
                                     dst: targetId,
                                     payload: {
                                         type: 'offer',
-                                        sdp: rtcPeerConnection.localDescription.sdp
+                                        sdp: pc.localDescription.sdp
                                     }
                                 });
                             }
                         };
                         
-                        if (rtcPeerConnection.iceGatheringState === 'complete') {
+                        if (pc.iceGatheringState === 'complete' && pc.localDescription) {
                             sendSignal({
                                 type: 'OFFER',
                                 src: viewerId,
                                 dst: targetId,
                                 payload: {
                                     type: 'offer',
-                                    sdp: rtcPeerConnection.localDescription.sdp
+                                    sdp: pc.localDescription.sdp
                                 }
                             });
                         }
@@ -619,15 +630,19 @@ document.addEventListener('DOMContentLoaded', () => {
                     // Passo 2: Recebeu resposta do Python
                     else if (data.type === 'ANSWER') {
                         console.log('[VIEWER] Resposta SDP remota recebida.');
-                        await rtcPeerConnection.setRemoteDescription(new RTCSessionDescription({
-                            type: 'answer',
-                            sdp: data.payload.sdp
-                        }));
-                        logViewerEvent('Conexão P2P negociada com sucesso!', 'info');
+                        if (pc.signalingState !== 'closed') {
+                            await pc.setRemoteDescription(new RTCSessionDescription({
+                                type: 'answer',
+                                sdp: data.payload.sdp
+                            }));
+                            logViewerEvent('Conexão P2P negociada com sucesso!', 'info');
+                        }
                         
                         // Fechar canal de sinalização - o P2P já está estabelecido!
-                        signalingWebsocket.close();
-                        signalingWebsocket = null;
+                        if (signalingWebsocket) {
+                            signalingWebsocket.close();
+                            signalingWebsocket = null;
+                        }
                     }
                 } catch (err) {
                     console.error('[VIEWER] Erro na sinalização:', err);
@@ -665,22 +680,22 @@ document.addEventListener('DOMContentLoaded', () => {
     function disconnectViewer() {
         stopStatsMonitoring();
         if (currentCall) {
-            currentCall.close();
+            try { currentCall.close(); } catch(e){}
             currentCall = null;
         }
         
         if (currentDataConnection) {
-            currentDataConnection.close();
+            try { currentDataConnection.close(); } catch(e){}
             currentDataConnection = null;
         }
         
         if (rtcPeerConnection) {
-            rtcPeerConnection.close();
+            try { rtcPeerConnection.close(); } catch(e){}
             rtcPeerConnection = null;
         }
         
         if (signalingWebsocket) {
-            signalingWebsocket.close();
+            try { signalingWebsocket.close(); } catch(e){}
             signalingWebsocket = null;
         }
 
@@ -688,6 +703,9 @@ document.addEventListener('DOMContentLoaded', () => {
         remoteVideo.classList.add('hidden');
         videoPlaceholder.classList.remove('hidden');
         
+        // --- RESTAURAR ESTADOS DO BOTÃO ---
+        btnConnectStream.disabled = false;
+        btnConnectStream.textContent = 'Conectar';
         btnConnectStream.classList.remove('hidden');
         btnDisconnectStream.classList.add('hidden');
         viewerControlBar.classList.add('hidden');
