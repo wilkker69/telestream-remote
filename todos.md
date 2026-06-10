@@ -1,6 +1,6 @@
 # TeleStream Remote Todo List
 
-- [ ] Task 1: Agente Python Local (`agent.py` e `test_agent.py`)
+- [x] Task 1: Agente Python Local (`agent.py` e `test_agent.py`)
 - [ ] Task 2: Estrutura HTML (`index.html`)
 - [ ] Task 3: Estilização Visual (`styles.css`)
 - [ ] Task 4: Lógica JavaScript - Configuração WebRTC e Streamer (`app.js` Parte 1)
