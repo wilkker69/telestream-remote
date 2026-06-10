@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TeleStream Remote - Transmissão e Controle de Tela</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <!-- PeerJS Library para WebRTC P2P -->
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js" defer></script>
+    <script src="app.js" defer></script>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Hub Inicial -->
+        <header class="app-header">
+            <h1>TeleStream <span>Remote</span></h1>
+            <p>Compartilhamento de tela ultra-rápido com controle remoto via navegador</p>
+        </header>
+
+        <main class="app-main">
+            <!-- Menu de Seleção de Modo -->
+            <div id="mode-selector" class="card fade-in">
+                <h2>Como você deseja começar?</h2>
+                <div class="modes-grid">
+                    <button id="btn-select-streamer" class="mode-btn">
+                        <div class="mode-icon">📺</div>
+                        <h3>Transmitir Minha Tela</h3>
+                        <p>Gere um link/ID para outra pessoa assistir e controlar este computador remotamente.</p>
+                    </button>
+                    <button id="btn-select-viewer" class="mode-btn">
+                        <div class="mode-icon">🎮</div>
+                        <h3>Controlar uma Tela</h3>
+                        <p>Insira um ID de conexão para assistir e interagir com outra máquina.</p>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Painel do Transmissor (Streamer) -->
+            <div id="panel-streamer" class="card fade-in hidden">
+                <div class="panel-header">
+                    <button class="btn-back">← Voltar</button>
+                    <h2>Painel do Transmissor</h2>
+                </div>
+                
+                <div class="status-grid">
+                    <div class="status-item">
+                        <span class="status-label">Agente Local Python:</span>
+                        <span id="agent-status" class="badge badge-red">Desconectado</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-label">ID de Conexão:</span>
+                        <span id="streamer-id-display" class="badge badge-gray">Aguardando...</span>
+                    </div>
+                </div>
+
+                <div class="action-section">
+                    <button id="btn-start-stream" class="btn btn-primary">Começar Transmissão</button>
+                    <button id="btn-stop-stream" class="btn btn-danger hidden">Parar Transmissão</button>
+                </div>
+
+                <div class="instructions-card">
+                    <h4>💡 Próximos Passos:</h4>
+                    <ol>
+                        <li>Certifique-se de estar rodando o agente Python local (<code>python agent.py</code>).</li>
+                        <li>Clique em <strong>"Começar Transmissão"</strong> e selecione a tela inteira a ser compartilhada.</li>
+                        <li>Compartilhe o ID gerado com quem irá controlar seu PC.</li>
+                    </ol>
+                </div>
+                <video id="local-video-preview" autoplay muted playsinline class="video-preview hidden"></video>
+            </div>
+
+            <!-- Painel do Visualizador (Viewer) -->
+            <div id="panel-viewer" class="card fade-in hidden">
+                <div class="panel-header">
+                    <button class="btn-back">← Voltar</button>
+                    <h2>Painel de Visualização & Controle</h2>
+                </div>
+
+                <div class="viewer-connection-bar">
+                    <input type="text" id="input-target-id" placeholder="Insira o ID do Transmissor (ex: telestream-xxxx)">
+                    <button id="btn-connect-stream" class="btn btn-primary">Conectar</button>
+                    <button id="btn-disconnect-stream" class="btn btn-danger hidden">Desconectar</button>
+                </div>
+
+                <div id="viewer-control-bar" class="viewer-control-bar hidden">
+                    <div class="status-item">
+                        <span class="status-label">Status:</span>
+                        <span id="connection-status" class="badge badge-gray">Desconectado</span>
+                    </div>
+                    <label class="switch-container">
+                        <input type="checkbox" id="toggle-control-enabled">
+                        <span class="slider"></span>
+                        Habilitar Controle Remoto
+                    </label>
+                </div>
+
+                <div class="video-container" id="video-container">
+                    <div class="video-placeholder" id="video-placeholder">
+                        <span>Nenhuma conexão ativa. Insira o ID acima para conectar.</span>
+                    </div>
+                    <video id="remote-video" autoplay playsinline class="hidden"></video>
+                </div>
+            </div>
+        </main>
+        
+        <footer class="app-footer">
+            <p>TeleStream Remote. Hospedado no GitHub Pages.</p>
+        </footer>
+    </div>
+</body>
+</html>
