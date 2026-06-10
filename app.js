@@ -34,6 +34,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentCall = null;
     let currentDataConnection = null;
     let reconnectTimeout = null;
+    let lastMouseMoveTime = 0;
+    const MOUSE_MOVE_THROTTLE_MS = 33; // ~30 vezes por segundo (30Hz)
 
     // Navegação do Hub
     btnSelectStreamer.addEventListener('click', () => {
@@ -331,6 +333,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // 1. Mouse Move e Cliques
     remoteVideo.addEventListener('mousemove', (e) => {
+        const now = Date.now();
+        if (now - lastMouseMoveTime < MOUSE_MOVE_THROTTLE_MS) return;
+        lastMouseMoveTime = now;
+
         const rect = remoteVideo.getBoundingClientRect();
         const rx = (e.clientX - rect.left) / rect.width;
         const ry = (e.clientY - rect.top) / rect.height;
